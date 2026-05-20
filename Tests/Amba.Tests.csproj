@@ -1,0 +1,58 @@
+<Project Sdk="Microsoft.NET.Sdk">
+
+  <!--
+    Standalone .NET test project that compiles `Runtime/Amba.cs` + the
+    NUnit test files from `Tests/Editor/` + `Tests/Integration/` into a
+    single test assembly runnable by `dotnet test`.
+
+    Why this exists alongside the Unity asmdef:
+    - Unity Test Framework requires the Unity Editor + a license. CI
+      can't reasonably pay for that just to run pure-managed unit tests.
+    - The same test files are valid NUnit either way — they don't touch
+      `UnityEngine`, only `System.Text.Json` / `IntPtr` plumbing.
+    - Unit tests under `Tests/Editor/` never actually invoke the
+      DllImport stubs because they construct `AmbaClient` with a fake
+      `INativeMethods`, so the native library doesn't need to be present.
+    - Integration tests under `Tests/Integration/` DO invoke the real
+      Rust core via `Amba.ConfigureAsync` → `DefaultNativeMethods` and
+      hit staging over HTTP. They carry `[Category("Integration")]` and
+      are filtered out of the unit-test run.
+
+    CI jobs in `.github/workflows/`:
+    - `unity-tests` in `ci.yml` runs with `Category!=Integration`
+    - `customer-smoke (unity)` in `customer-smoke.yml` runs the
+      inverse, `Category=Integration`
+  -->
+
+  <PropertyGroup>
+    <TargetFramework>net8.0</TargetFramework>
+    <AssemblyName>Amba.Tests</AssemblyName>
+    <RootNamespace>Layers.Amba.Tests</RootNamespace>
+    <IsPackable>false</IsPackable>
+    <LangVersion>latest</LangVersion>
+    <Nullable>disable</Nullable>
+    <!--
+      `EnableDefaultCompileItems=false` — we want explicit control over
+      which files compile. The csproj is in `unity/Tests/`, which is a
+      sibling of `unity/Runtime/`; the default glob would only pick up
+      the *.cs files under `Tests/`.
+    -->
+    <EnableDefaultCompileItems>false</EnableDefaultCompileItems>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <Compile Include="..\Runtime\Amba.cs" Link="Amba.cs" />
+    <Compile Include="Editor\AmbaTests.cs" Link="AmbaTests.cs" />
+    <Compile Include="Integration\Fixtures.cs" Link="Fixtures.cs" />
+    <Compile Include="Integration\FixturesTest.cs" Link="FixturesTest.cs" />
+    <Compile Include="Integration\SmokeTest.cs" Link="SmokeTest.cs" />
+  </ItemGroup>
+
+  <ItemGroup>
+    <PackageReference Include="Microsoft.NET.Test.Sdk" Version="17.10.0" />
+    <PackageReference Include="Newtonsoft.Json" Version="13.0.3" />
+    <PackageReference Include="NUnit" Version="3.14.0" />
+    <PackageReference Include="NUnit3TestAdapter" Version="4.5.0" />
+  </ItemGroup>
+
+</Project>

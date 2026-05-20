@@ -1,0 +1,30 @@
+{
+  "name": "com.layers.amba",
+  "version": "1.0.0",
+  "displayName": "amba SDK",
+  "description": "amba SDK for Unity \u2014 full 25-namespace surface for the agent-native backend-as-a-service.",
+  "unity": "2022.3",
+  "license": "MIT",
+  "documentationUrl": "https://docs.amba.dev/docs/sdk/unity",
+  "changelogUrl": "https://github.com/layers/amba-sdk-unity/blob/main/CHANGELOG.md",
+  "licensesUrl": "https://opensource.org/licenses/MIT",
+  "dependencies": {},
+  "keywords": [
+    "amba",
+    "backend",
+    "analytics",
+    "auth",
+    "collections",
+    "storage",
+    "push"
+  ],
+  "author": {
+    "name": "Layers",
+    "email": "support@layers.com",
+    "url": "https://amba.dev"
+  },
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/layers/amba-sdk-unity.git"
+  }
+}

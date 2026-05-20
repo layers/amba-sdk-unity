@@ -1,0 +1,16 @@
+<!--
+  link.xml — IL2CPP/AOT linker preservation for com.layers.amba.
+
+  Unity's IL2CPP linker strips types and members that it cannot statically
+  prove are reachable. The Amba SDK deserialises server responses into typed
+  models (Streak, XpBalance, …) via Newtonsoft.Json generic reflection; those
+  types are invisible to the static analysis and would be stripped without this
+  file.
+
+  Preserving the whole assembly is intentional: the reflection surface is
+  wide (every namespace, every model), and the assembly is small enough that
+  the size cost is negligible compared to the Rust native library.
+-->
+<linker>
+  <assembly fullname="com.layers.amba" preserve="all"/>
+</linker>
