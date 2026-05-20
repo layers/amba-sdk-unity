@@ -105,6 +105,9 @@ namespace Layers.Amba
         public DeepLinksNamespace DeepLinks { get; }
         public OnboardingNamespace Onboarding { get; }
 
+        // ── diagnostics ──
+        public DiagnosticsNamespace Diagnostics { get; }
+
         /// <summary>
         /// Construct a client backed by <paramref name="bindings"/>. Every
         /// namespace below shares the same binding instance; isolation
@@ -146,6 +149,8 @@ namespace Layers.Amba
             Content = new ContentNamespace(bindings);
             DeepLinks = new DeepLinksNamespace(bindings);
             Onboarding = new OnboardingNamespace(bindings);
+
+            Diagnostics = new DiagnosticsNamespace(bindings);
         }
 
         /// <summary>Stable per-install anonymous identifier.</summary>
@@ -215,7 +220,7 @@ namespace Layers.Amba
     /// </summary>
     public static class Amba
     {
-        public const string Version = "1.0.0";
+        public const string Version = "1.0.1";
 
         private static AmbaClient _client;
 
@@ -287,6 +292,9 @@ namespace Layers.Amba
         public static ContentNamespace Content => RequireClient().Content;
         public static DeepLinksNamespace DeepLinks => RequireClient().DeepLinks;
         public static OnboardingNamespace Onboarding => RequireClient().Onboarding;
+
+        // ── diagnostics ──
+        public static DiagnosticsNamespace Diagnostics => RequireClient().Diagnostics;
 
         public static string AnonymousId => RequireClient().AnonymousId;
         public static string AppUserId => RequireClient().AppUserId;
@@ -1146,6 +1154,228 @@ namespace Layers.Amba
     }
 
     // ═══════════════════════════════════════════════════════════════
+    // Diagnostics — wire-verify primitive
+    //
+    // Customers (or installer agents) call `Amba.Diagnostics.Ping()`
+    // once after configuration to confirm the SDK is talking to the
+    // expected project with the expected key in the expected
+    // environment. Every field on `PingResult` is server-decided, so
+    // comparing `server_project_id` / `key_fingerprint` against what
+    // the customer thinks they configured catches "wrong .env" silent
+    // failures on the spot.
+    //
+    // Wire schema authoritative in `core/src/diagnostics.rs::PingResult`
+    // and the route handler at `apps/api/src/routes/client/diagnostics.ts`.
+    // ═══════════════════════════════════════════════════════════════
+
+    /// <summary>
+    /// Server-echoed diagnostics envelope. Every field is decided by
+    /// the SERVER — none is trusted from the request. Mirrors the
+    /// Rust core's <c>PingResult</c> struct.
+    /// </summary>
+    /// <remarks>
+    /// <para>
+    /// On a successful round-trip <see cref="Ok"/> is <c>true</c> and
+    /// <see cref="Error"/> is <c>null</c>. On a server-side internal
+    /// failure (e.g. control DB read error) the route returns 200 with
+    /// <see cref="Ok"/> = <c>false</c> and <see cref="Error"/> populated
+    /// with a stable code like <c>"DIAGNOSTICS_INTERNAL_ERROR"</c>.
+    /// Network / auth failures (4xx, 5xx, no connectivity) bubble out
+    /// as <see cref="AmbaApiError"/> from <see cref="DiagnosticsNamespace.PingAsync"/>
+    /// and never produce a <see cref="PingResult"/>.
+    /// </para>
+    /// <para>
+    /// Struct (not class) per the multi-SDK shape convention — small,
+    /// value-typed, no inheritance hooks needed.
+    /// </para>
+    /// </remarks>
+    public struct PingResult
+    {
+        /// <summary><c>true</c> on a successful diagnostic; <c>false</c> when
+        /// the server reached the route but couldn't resolve the lookup.</summary>
+        [JsonProperty("ok")] public bool Ok;
+
+        /// <summary>The project id the server resolved from the API key.
+        /// Compare against the project id the customer thinks they
+        /// configured. Empty string (or <c>null</c>) when <see cref="Ok"/>
+        /// is <c>false</c> and the lookup failed.</summary>
+        [JsonProperty("server_project_id")] public string ServerProjectId;
+
+        /// <summary><c>"production"</c> / <c>"staging"</c> / <c>"sandbox"</c>,
+        /// derived server-side from the API key's environment + developer
+        /// tier. <c>null</c> when the lookup failed.</summary>
+        [JsonProperty("environment")] public string Environment;
+
+        /// <summary>Last 4 hex chars of the sha256 of the API key the
+        /// server actually saw on this request. Match against the same
+        /// suffix in the developer console to confirm the right secret
+        /// is loaded.</summary>
+        [JsonProperty("key_fingerprint")] public string KeyFingerprint;
+
+        /// <summary>Server-measured handler latency in milliseconds (does
+        /// NOT include client-side network time).</summary>
+        [JsonProperty("latency_ms")] public long LatencyMs;
+
+        /// <summary><c>null</c> on success. On a server-side failure the
+        /// route returns 200 with <see cref="Ok"/> = <c>false</c> and a
+        /// stable code here — typically <c>"DIAGNOSTICS_INTERNAL_ERROR"</c>.</summary>
+        [JsonProperty("error")] public string Error;
+    }
+
+    /// <summary>
+    /// Diagnostics namespace — wire-verify primitive. Call
+    /// <see cref="PingAsync"/> once after <see cref="Amba.ConfigureAsync"/>
+    /// to confirm the SDK is talking to the expected project.
+    /// </summary>
+    public class DiagnosticsNamespace
+    {
+        private readonly INativeMethods _bindings;
+        public DiagnosticsNamespace(INativeMethods bindings) { _bindings = bindings; }
+
+        // The customer-facing alias matches the brief / public docs —
+        // CamelCase, no `Async` suffix. Forwards to the canonical
+        // `PingAsync` method.
+        public Task<PingResult> Ping() => PingAsync();
+
+        /// <summary>
+        /// Issue a wire-verify ping. Returns a <see cref="PingResult"/>
+        /// even on server-side internal failures (those surface as
+        /// <c>Ok=false</c> + populated <c>Error</c>). Throws
+        /// <see cref="AmbaApiError"/> for transport / auth / 5xx
+        /// failures.
+        /// </summary>
+        /// <remarks>
+        /// Emits a single <c>UnityEngine.Debug.Log</c> on success and
+        /// <c>UnityEngine.Debug.LogError</c> on failure, both prefixed
+        /// with <c>[Amba SDK]</c> so Unity console filtering works.
+        /// The log call is compiled out under non-Unity test contexts.
+        /// </remarks>
+        public Task<PingResult> PingAsync()
+        {
+            try
+            {
+                var raw = NativeUtil.CallReturnString(_bindings.amba_diagnostics_ping, _bindings);
+                if (raw == null)
+                {
+                    DiagnosticsLog.Error("ping: native returned null");
+                    throw new AmbaApiError("UNKNOWN_ERROR", "diagnostics.ping returned null");
+                }
+
+                // Two wire shapes to disambiguate before decoding:
+                //
+                //  1. Transport/auth/5xx — Rust's FFI layer emits an
+                //     error envelope `{"error":"<msg>"[,"code":...]}` via
+                //     `err_json(&e.to_string())`. Must surface as
+                //     AmbaApiError so callers branch on `.Code`.
+                //
+                //  2. PingResult success/server-side-failure envelope —
+                //     `{"ok":..., "server_project_id":..., "key_fingerprint":...}`.
+                //     Even on `ok=false` this still has `key_fingerprint`
+                //     populated. The wrapper surfaces this as a structured
+                //     `PingResult`, never as a throw.
+                //
+                // Discriminator: a PingResult ALWAYS has `key_fingerprint`
+                // (always populated server-side; see diagnostics.ts).
+                // A bare error envelope has only `error` (and maybe `code`,
+                // `details`). Parsing as JToken first to inspect keys
+                // costs one allocation but avoids the ambiguity of
+                // `Newtonsoft.JsonConvert.DeserializeObject<PingResult>`
+                // happily mapping an error envelope into a default
+                // PingResult with Error=<msg>.
+                JToken token;
+                try
+                {
+                    token = JToken.Parse(raw);
+                }
+                catch (JsonException e)
+                {
+                    DiagnosticsLog.Error($"ping: invalid JSON — {e.Message}");
+                    throw new AmbaApiError("UNKNOWN_ERROR", $"invalid JSON: {raw}");
+                }
+
+                // Error-envelope path: object with `error` string and NO
+                // `key_fingerprint`. `JsonUtil.MaybeThrow` does the
+                // structured throw (code + details inference).
+                if (token.Type == JTokenType.Object
+                    && token["key_fingerprint"] == null
+                    && token["error"] is JValue err
+                    && err.Type == JTokenType.String)
+                {
+                    JsonUtil.MaybeThrow(raw);
+                    // Defensive — MaybeThrow should have thrown above.
+                    throw new AmbaApiError("UNKNOWN_ERROR", (string)err);
+                }
+
+                PingResult result;
+                try
+                {
+                    result = token.ToObject<PingResult>();
+                }
+                catch (JsonException e)
+                {
+                    DiagnosticsLog.Error($"ping: decode failed — {e.Message}");
+                    throw new AmbaApiError("UNKNOWN_ERROR", $"decode: {e.Message}");
+                }
+
+                if (result.Ok)
+                {
+                    DiagnosticsLog.Info(
+                        $"ping ok project={result.ServerProjectId} env={result.Environment} " +
+                        $"key={result.KeyFingerprint} latency_ms={result.LatencyMs}");
+                }
+                else
+                {
+                    DiagnosticsLog.Error(
+                        $"ping not-ok error={result.Error ?? "unknown"} " +
+                        $"project={result.ServerProjectId} key={result.KeyFingerprint}");
+                }
+                return Task.FromResult(result);
+            }
+            catch (AmbaApiError api)
+            {
+                // Don't swallow — log first so Unity devs see the failure
+                // in their Console, then re-throw so caller can branch.
+                DiagnosticsLog.Error($"ping failed code={api.Code} message={api.Message}");
+                throw;
+            }
+        }
+    }
+
+    /// <summary>
+    /// Platform-idiomatic logging shim for diagnostics. Under Unity
+    /// (UNITY_5_3_OR_NEWER) forwards to <c>UnityEngine.Debug</c> so
+    /// messages show up in the Editor Console. Under pure-managed
+    /// test contexts (where Unity is unavailable, e.g. `dotnet test`)
+    /// writes to <c>System.Console.Error</c> so the messages still
+    /// surface in CI logs.
+    ///
+    /// Internal so customers don't depend on the surface — the public
+    /// log story is "we log via UnityEngine.Debug, prefixed [Amba SDK]".
+    /// </summary>
+    internal static class DiagnosticsLog
+    {
+        private const string Prefix = "[Amba SDK]";
+
+        public static void Info(string message)
+        {
+#if UNITY_5_3_OR_NEWER
+            UnityEngine.Debug.Log($"{Prefix} {message}");
+#else
+            System.Console.Error.WriteLine($"{Prefix} {message}");
+#endif
+        }
+
+        public static void Error(string message)
+        {
+#if UNITY_5_3_OR_NEWER
+            UnityEngine.Debug.LogError($"{Prefix} {message}");
+#else
+            System.Console.Error.WriteLine($"{Prefix} ERROR {message}");
+#endif
+        }
+    }
+
+    // ═══════════════════════════════════════════════════════════════
     // Typed data models — opt-in decoding of common payloads
     //
     // Most namespace methods return `JToken` (raw JSON) so callers can
@@ -1355,6 +1585,9 @@ namespace Layers.Amba
         IntPtr amba_onboarding_next_step(IntPtr payloadJson);
         IntPtr amba_onboarding_skip_step();
         IntPtr amba_onboarding_complete();
+
+        // ── diagnostics ──
+        IntPtr amba_diagnostics_ping();
     }
 
     /// <summary>
@@ -1510,6 +1743,9 @@ namespace Layers.Amba
         public IntPtr amba_onboarding_next_step(IntPtr payloadJson) => NativeMethods.amba_onboarding_next_step(payloadJson);
         public IntPtr amba_onboarding_skip_step() => NativeMethods.amba_onboarding_skip_step();
         public IntPtr amba_onboarding_complete() => NativeMethods.amba_onboarding_complete();
+
+        // ── diagnostics ──
+        public IntPtr amba_diagnostics_ping() => NativeMethods.amba_diagnostics_ping();
     }
 
     // ═══════════════════════════════════════════════════════════════
@@ -1820,5 +2056,8 @@ namespace Layers.Amba
         [DllImport(LIB)] public static extern IntPtr amba_onboarding_next_step(IntPtr payloadJson);
         [DllImport(LIB)] public static extern IntPtr amba_onboarding_skip_step();
         [DllImport(LIB)] public static extern IntPtr amba_onboarding_complete();
+
+        // ── diagnostics ──
+        [DllImport(LIB)] public static extern IntPtr amba_diagnostics_ping();
     }
 }

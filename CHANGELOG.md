@@ -2,6 +2,15 @@
 
 All notable changes to this package are documented here.
 
+## [1.0.1] — 2026-05-20
+
+- Added `Amba.Diagnostics.Ping()` — wire-verify primitive that returns a
+  server-decided `PingResult { Ok, ServerProjectId, Environment, KeyFingerprint, LatencyMs, Error }`.
+  Customers (or installer agents) call this once after `ConfigureAsync` to confirm the
+  SDK is talking to the expected project with the expected key in the expected
+  environment. Logs to `UnityEngine.Debug.Log` (success) / `Debug.LogError` (failure)
+  with `[Amba SDK]` prefix.
+
 ## [1.0.0] — 2026-05-17
 
 Initial release.

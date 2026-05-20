@@ -1152,6 +1152,126 @@ namespace Layers.Amba.Tests
             Assert.That(c1.Auth, Is.Not.SameAs(c2.Auth));
             Assert.That(c1.Collections, Is.Not.SameAs(c2.Collections));
         }
+
+        // ── diagnostics ──────────────────────────────────────────────
+
+        [Test]
+        public async System.Threading.Tasks.Task DiagnosticsPing_DecodesHappyPathEnvelope()
+        {
+            _fake.Enqueue(
+                "diagnostics_ping",
+                "{\"ok\":true,\"server_project_id\":\"proj_abc\"," +
+                "\"environment\":\"sandbox\",\"key_fingerprint\":\"4f8a\"," +
+                "\"latency_ms\":73,\"error\":null}");
+
+            var result = await _client.Diagnostics.PingAsync();
+
+            Assert.That(result.Ok, Is.True);
+            Assert.That(result.ServerProjectId, Is.EqualTo("proj_abc"));
+            Assert.That(result.Environment, Is.EqualTo("sandbox"));
+            Assert.That(result.KeyFingerprint, Is.EqualTo("4f8a"));
+            Assert.That(result.LatencyMs, Is.EqualTo(73));
+            Assert.That(result.Error, Is.Null);
+
+            // Wrapper dispatched to the single native symbol with no args.
+            Assert.That(_fake.Calls, Has.Count.EqualTo(1));
+            Assert.That(_fake.Calls[0].Name, Is.EqualTo("diagnostics_ping"));
+            Assert.That(_fake.Calls[0].Args, Is.Empty);
+        }
+
+        [Test]
+        public async System.Threading.Tasks.Task DiagnosticsPing_DecodesServerSideFailureEnvelope()
+        {
+            // Wire shape: 200 OK with ok=false + populated error code.
+            // The wrapper must surface as a structured PingResult, NOT throw.
+            _fake.Enqueue(
+                "diagnostics_ping",
+                "{\"ok\":false,\"server_project_id\":\"proj_abc\"," +
+                "\"environment\":null,\"key_fingerprint\":\"4f8a\"," +
+                "\"latency_ms\":4,\"error\":\"DIAGNOSTICS_INTERNAL_ERROR\"}");
+
+            var result = await _client.Diagnostics.PingAsync();
+
+            Assert.That(result.Ok, Is.False);
+            Assert.That(result.Error, Is.EqualTo("DIAGNOSTICS_INTERNAL_ERROR"));
+            Assert.That(result.Environment, Is.Null,
+                "environment should round-trip null for non-ok envelopes");
+            Assert.That(result.KeyFingerprint, Is.EqualTo("4f8a"));
+            Assert.That(result.LatencyMs, Is.EqualTo(4));
+        }
+
+        [Test]
+        public void DiagnosticsPing_ThrowsOnTransportErrorEnvelope()
+        {
+            // Rust core surfaces 401 as `{"error": "Unauthorized..."}`
+            // via `err_json(&e.to_string())`. The wrapper must throw
+            // AmbaApiError with code UNAUTHORIZED, NOT decode silently
+            // into a default PingResult.
+            _fake.Enqueue(
+                "diagnostics_ping",
+                "{\"error\":\"Unauthorized: invalid api key\"}");
+
+            var ex = Assert.ThrowsAsync<AmbaApiError>(async () =>
+                await _client.Diagnostics.PingAsync());
+            Assert.That(ex.Code, Is.EqualTo("UNAUTHORIZED"));
+            Assert.That(ex.Message, Is.EqualTo("Unauthorized: invalid api key"));
+        }
+
+        [Test]
+        public void DiagnosticsPing_PingAliasIsTheSameAsPingAsync()
+        {
+            // Public surface offered as `Diagnostics.Ping()` (brief) AND
+            // `Diagnostics.PingAsync()` (in-house async-suffix convention).
+            // Both must dispatch identically.
+            _fake.Enqueue(
+                "diagnostics_ping",
+                "{\"ok\":true,\"server_project_id\":\"p\"," +
+                "\"environment\":\"production\",\"key_fingerprint\":\"abcd\"," +
+                "\"latency_ms\":1,\"error\":null}");
+
+            var task = _client.Diagnostics.Ping();
+            Assert.That(task, Is.Not.Null, "Ping() returns a Task<PingResult>");
+            Assert.That(task.Result.Ok, Is.True);
+            Assert.That(_fake.Calls, Has.Count.EqualTo(1));
+            Assert.That(_fake.Calls[0].Name, Is.EqualTo("diagnostics_ping"));
+        }
+
+        [Test]
+        public async System.Threading.Tasks.Task DiagnosticsPing_RoundTripsPingResultThroughJson()
+        {
+            // Spec self-test (per polyfill-spec-test rule): build a
+            // canonical PingResult on the wire, decode, re-encode, and
+            // confirm the byte-shape matches the on-wire convention.
+            // Locks the JsonProperty wire-name contract — a future field
+            // rename would silently break server-side comparison
+            // ("server_project_id" → "serverProjectId" is a subtle 4am bug).
+            var wire = "{\"ok\":true,\"server_project_id\":\"proj_xyz\"," +
+                       "\"environment\":\"staging\",\"key_fingerprint\":\"deef\"," +
+                       "\"latency_ms\":42,\"error\":null}";
+            _fake.Enqueue("diagnostics_ping", wire);
+
+            var decoded = await _client.Diagnostics.PingAsync();
+            var reencoded = Newtonsoft.Json.JsonConvert.SerializeObject(decoded);
+
+            // Compare normalized JTokens — field ordering is not stable
+            // across Newtonsoft versions, but the (key, value) set must
+            // match exactly.
+            var original = JToken.Parse(wire);
+            var reparsed = JToken.Parse(reencoded);
+            Assert.That(JToken.DeepEquals(original, reparsed), Is.True,
+                $"round-trip changed wire shape: original={original} re-encoded={reparsed}");
+        }
+
+        [Test]
+        public void Amba_Static_Diagnostics_ThrowsWhenNotConfigured()
+        {
+            // Static facade discipline: Amba.Diagnostics must require
+            // ConfigureAsync just like every other Amba.* namespace.
+            Assert.Throws<InvalidOperationException>(() =>
+            {
+                var _ = Amba.Diagnostics;
+            });
+        }
     }
 
     // ── Fake INativeMethods ──────────────────────────────────────────
@@ -1387,6 +1507,9 @@ namespace Layers.Amba.Tests
         public IntPtr amba_onboarding_next_step(IntPtr payloadJson) => Respond("onboarding_next_step", FromPtr(payloadJson));
         public IntPtr amba_onboarding_skip_step() => Respond("onboarding_skip_step");
         public IntPtr amba_onboarding_complete() => Respond("onboarding_complete");
+
+        // ── diagnostics ──
+        public IntPtr amba_diagnostics_ping() => Respond("diagnostics_ping");
     }
 
     public readonly struct Call

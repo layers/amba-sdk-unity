@@ -180,6 +180,29 @@ namespace Layers.Amba.Tests.Integration
             Assert.That(Amba.IsAuthenticated, Is.False,
                 "IsAuthenticated must be false before SignIn");
 
+            // ── Diagnostics: wire-verify against the freshly-minted key ──
+            //
+            // The smoke just provisioned _projectId and got back _clientKey
+            // for it. Pinging should round-trip with ok=true and a
+            // server_project_id that matches what the smoke is holding.
+            // That's the entire purpose of the primitive: a customer (or
+            // installer agent) can do this comparison and catch a "wrong
+            // env, right code" misconfiguration before any user signs in.
+            var ping = await Amba.Diagnostics.PingAsync();
+            Assert.That(ping.Ok, Is.True,
+                $"ping.ok must be true on a freshly-provisioned project; got error={ping.Error}");
+            Assert.That(ping.ServerProjectId, Is.EqualTo(_projectId),
+                $"server-resolved project_id ({ping.ServerProjectId}) must " +
+                $"match the one the smoke just provisioned ({_projectId})");
+            Assert.That(ping.Environment, Is.Not.Null.And.Not.Empty,
+                "environment label should populate for an active project");
+            Assert.That(ping.KeyFingerprint, Is.Not.Null.And.Not.Empty,
+                "key_fingerprint should always populate (last 4 chars of sha256)");
+            Assert.That(ping.LatencyMs, Is.GreaterThanOrEqualTo(0));
+            Console.Error.WriteLine(
+                $"  ✓ ping ok project={ping.ServerProjectId} env={ping.Environment} " +
+                $"key={ping.KeyFingerprint} latency_ms={ping.LatencyMs}");
+
             // ── Auth: signIn anonymously, capture session ────────────
             var anon = await Amba.Auth.SignInAnonymouslyAsync();
             var sessionToken = (string)anon["session_token"];
