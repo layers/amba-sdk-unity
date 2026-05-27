@@ -9,7 +9,7 @@ Supported build targets: iOS, Android, macOS, Windows, Linux.
 In Unity, open **Window → Package Manager → + → Add package from git URL** and paste:
 
 ```
-https://github.com/layers/amba-sdk-unity.git#v1.0.0
+https://github.com/layers/amba-sdk-unity.git#4.0.0
 ```
 
 Or in `Packages/manifest.json`:
@@ -17,7 +17,7 @@ Or in `Packages/manifest.json`:
 ```json
 {
   "dependencies": {
-    "com.layers.amba": "https://github.com/layers/amba-sdk-unity.git#v1.0.0"
+    "com.layers.amba": "https://github.com/layers/amba-sdk-unity.git#4.0.0"
   }
 }
 ```

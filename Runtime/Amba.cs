@@ -71,6 +71,9 @@ namespace Layers.Amba
 
         public EventsNamespace Events { get; }
         public AuthNamespace Auth { get; }
+        public UsersNamespace Users { get; }
+        public SessionsNamespace Sessions { get; }
+        public SyncNamespace Sync { get; }
         public CollectionsNamespace Collections { get; }
         public StorageNamespace Storage { get; }
         public PushNamespace Push { get; }
@@ -85,6 +88,7 @@ namespace Layers.Amba
         public CurrenciesNamespace Currencies { get; }
         public InventoryNamespace Inventory { get; }
         public LeaderboardsNamespace Leaderboards { get; }
+        public LeaguesNamespace Leagues { get; }
         public StoresNamespace Stores { get; }
         public XpNamespace Xp { get; }
         public StreaksNamespace Streaks { get; }
@@ -119,6 +123,9 @@ namespace Layers.Amba
             Bindings = bindings ?? throw new ArgumentNullException(nameof(bindings));
             Events = new EventsNamespace(bindings);
             Auth = new AuthNamespace(bindings);
+            Users = new UsersNamespace(bindings);
+            Sessions = new SessionsNamespace(bindings);
+            Sync = new SyncNamespace(bindings);
             Collections = new CollectionsNamespace(bindings);
             Storage = new StorageNamespace(bindings);
             Push = new PushNamespace(bindings);
@@ -132,6 +139,7 @@ namespace Layers.Amba
             Currencies = new CurrenciesNamespace(bindings);
             Inventory = new InventoryNamespace(bindings);
             Leaderboards = new LeaderboardsNamespace(bindings);
+            Leagues = new LeaguesNamespace(bindings);
             Stores = new StoresNamespace(bindings);
             Xp = new XpNamespace(bindings);
             Streaks = new StreaksNamespace(bindings);
@@ -171,7 +179,7 @@ namespace Layers.Amba
         /// <summary>Whether a session token is currently held.</summary>
         public bool IsAuthenticated => Bindings.amba_is_authenticated() != 0;
 
-        /// <summary>Toggle Rust-side debug logging.</summary>
+        /// <summary>Toggle engine-side debug logging.</summary>
         public void SetDebug(bool enabled) => Bindings.amba_set_debug(enabled ? 1u : 0u);
 
         /// <summary>
@@ -202,6 +210,35 @@ namespace Layers.Amba
             if (result != null) JsonUtil.ThrowFromRaw(result);
             return Task.CompletedTask;
         }
+
+        /// <summary>
+        /// Release the Rust core's singleton — clears the local session,
+        /// rotates the anonymous id, and frees the core slot so a
+        /// subsequent <see cref="InitializeAsync"/> can wire a fresh
+        /// tenant. Maps to the C-ABI <c>amba_reset</c> symbol (Phase A).
+        /// </summary>
+        /// <remarks>
+        /// Use this for multi-tenant apps that swap API keys at runtime,
+        /// or for sign-out flows that want a clean slate. The Rust core
+        /// logs a debug breadcrumb when in-flight FFI calls still hold
+        /// the core (those finish on the pre-reset state).
+        ///
+        /// On a successful reset, <see cref="AuthNamespace.OnAuthStateChange"/>
+        /// subscribers are notified with a <c>null</c> session — reset is
+        /// documented as a sign-out path (and multi-tenant swap) so UI/handlers
+        /// must transition out of the "signed in" state. Symmetric with
+        /// <see cref="AuthNamespace.SignOutAsync"/>.
+        /// </remarks>
+        public Task ResetAsync()
+        {
+            var raw = NativeUtil.CallReturnString(Bindings.amba_reset, Bindings);
+            if (raw != null) JsonUtil.ThrowFromRaw(raw);
+            // Native call succeeded — the local session is gone. Tell
+            // OnAuthStateChange subscribers so UI doesn't stay stuck on a
+            // logged-in view. Mirrors SignOutAsync's notify-on-success.
+            Auth.NotifyAuthSubscribersForReset();
+            return Task.CompletedTask;
+        }
     }
 
     // ═══════════════════════════════════════════════════════════════
@@ -220,7 +257,7 @@ namespace Layers.Amba
     /// </summary>
     public static class Amba
     {
-        public const string Version = "1.0.1";
+        public const string Version = "4.0.1";
 
         private static AmbaClient _client;
 
@@ -232,9 +269,9 @@ namespace Layers.Amba
         /// Calling ConfigureAsync a second time throws — the C-ABI core's
         /// <c>amba_init</c> rejects re-init with "amba already initialized"
         /// so the second call surfaces an <see cref="AmbaException"/> with
-        /// that message. To swap tenants in the same process, expose an
-        /// explicit reset flow (item C-9 follow-up) that calls the FFI
-        /// <c>amba_reset</c> symbol before re-calling ConfigureAsync.
+        /// that message. To swap tenants in the same process, call
+        /// <see cref="ResetAsync"/> first to release the Rust core's
+        /// singleton, then re-call ConfigureAsync with the new key.
         /// </remarks>
         public static async Task ConfigureAsync(string apiKey, string baseUrl = null, bool consentRequired = false, bool debug = false)
         {
@@ -259,6 +296,9 @@ namespace Layers.Amba
 
         public static EventsNamespace Events => RequireClient().Events;
         public static AuthNamespace Auth => RequireClient().Auth;
+        public static UsersNamespace Users => RequireClient().Users;
+        public static SessionsNamespace Sessions => RequireClient().Sessions;
+        public static SyncNamespace Sync => RequireClient().Sync;
         public static CollectionsNamespace Collections => RequireClient().Collections;
         public static StorageNamespace Storage => RequireClient().Storage;
         public static PushNamespace Push => RequireClient().Push;
@@ -273,6 +313,7 @@ namespace Layers.Amba
         public static CurrenciesNamespace Currencies => RequireClient().Currencies;
         public static InventoryNamespace Inventory => RequireClient().Inventory;
         public static LeaderboardsNamespace Leaderboards => RequireClient().Leaderboards;
+        public static LeaguesNamespace Leagues => RequireClient().Leagues;
         public static StoresNamespace Stores => RequireClient().Stores;
         public static XpNamespace Xp => RequireClient().Xp;
         public static StreaksNamespace Streaks => RequireClient().Streaks;
@@ -300,6 +341,37 @@ namespace Layers.Amba
         public static string AppUserId => RequireClient().AppUserId;
         public static bool IsAuthenticated => RequireClient().IsAuthenticated;
         public static void SetDebug(bool enabled) => RequireClient().SetDebug(enabled);
+
+        /// <summary>
+        /// Release the Rust core singleton and clear the static
+        /// <see cref="Client"/> reference. After calling this,
+        /// <see cref="ConfigureAsync"/> can be called again with a fresh
+        /// API key (multi-tenant flow). Throws
+        /// <see cref="InvalidOperationException"/> if no client is
+        /// configured.
+        ///
+        /// The static <c>_client</c> reference is cleared in a <c>finally</c>
+        /// block so that a failure inside the native <c>amba_reset</c> call
+        /// does not leave the facade in a half-configured state — once the
+        /// caller has asked for a reset, the next access must require a
+        /// fresh <see cref="ConfigureAsync"/>, error or no error.
+        ///
+        /// On a successful reset, <see cref="AuthNamespace.OnAuthStateChange"/>
+        /// subscribers are notified with a <c>null</c> session via the
+        /// instance <see cref="AmbaClient.ResetAsync"/> method.
+        /// </summary>
+        public static async Task ResetAsync()
+        {
+            var c = RequireClient();
+            try
+            {
+                await c.ResetAsync();
+            }
+            finally
+            {
+                _client = null;
+            }
+        }
 
         private static AmbaClient RequireClient() =>
             _client ?? throw new InvalidOperationException(
@@ -451,6 +523,56 @@ namespace Layers.Amba
             return Task.FromResult(token);
         }
 
+        /// <summary>
+        /// Request a one-time passcode for <paramref name="email"/>. The
+        /// server emails a 6-digit code; the user types it in, then call
+        /// <see cref="VerifyEmailOtpAsync"/> to exchange for a session.
+        /// </summary>
+        public Task RequestEmailOtpAsync(string email)
+        {
+            var raw = NativeUtil.InvokeUnary(_bindings.amba_auth_request_email_otp, email, _bindings);
+            if (raw != null) JsonUtil.ThrowFromRaw(raw);
+            return Task.CompletedTask;
+        }
+
+        /// <summary>
+        /// Exchange <paramref name="email"/> + <paramref name="code"/> for
+        /// a session. Returns the same <see cref="JToken"/> shape as
+        /// <see cref="SignInWithEmailAsync"/>.
+        /// </summary>
+        public Task<JToken> VerifyEmailOtpAsync(string email, string code)
+        {
+            var raw = NativeUtil.InvokeBinary(_bindings.amba_auth_verify_email_otp, email, code, _bindings);
+            var token = JsonUtil.ExpectJson(raw);
+            NotifyAuthSubscribers(SnapshotSession(token));
+            return Task.FromResult(token);
+        }
+
+        /// <summary>
+        /// Request a one-time passcode by SMS. <paramref name="phone"/>
+        /// must be E.164 (starts with `+`, 8–15 total digits). The SDK
+        /// rejects non-E.164 phones before the network call.
+        /// </summary>
+        public Task RequestSmsOtpAsync(string phone)
+        {
+            var raw = NativeUtil.InvokeUnary(_bindings.amba_auth_request_sms_otp, phone, _bindings);
+            if (raw != null) JsonUtil.ThrowFromRaw(raw);
+            return Task.CompletedTask;
+        }
+
+        /// <summary>
+        /// Exchange <paramref name="phone"/> + <paramref name="code"/>
+        /// for a session. Same <see cref="JToken"/> shape as
+        /// <see cref="VerifyEmailOtpAsync"/>.
+        /// </summary>
+        public Task<JToken> VerifySmsOtpAsync(string phone, string code)
+        {
+            var raw = NativeUtil.InvokeBinary(_bindings.amba_auth_verify_sms_otp, phone, code, _bindings);
+            var token = JsonUtil.ExpectJson(raw);
+            NotifyAuthSubscribers(SnapshotSession(token));
+            return Task.FromResult(token);
+        }
+
         public Task SignOutAsync(bool rotateAnonymousId = false)
         {
             var rawPtr = _bindings.amba_auth_sign_out(rotateAnonymousId ? 1u : 0u);
@@ -470,6 +592,47 @@ namespace Layers.Amba
 
         public Task<JToken> MeAsync() =>
             Task.FromResult(JsonUtil.ExpectJson(NativeUtil.CallReturnString(_bindings.amba_auth_me, _bindings)));
+
+        // ── 4.0 additions: magic link + account linking ──────────────
+
+        /// <summary>
+        /// Request a magic-link email to <paramref name="email"/>. The
+        /// server emails a one-time link; the client extracts the token
+        /// and calls <see cref="VerifyMagicLinkAsync"/> to exchange for a
+        /// session. Maps to <c>POST /v1/client/auth/magic-link/request</c>.
+        /// </summary>
+        public Task RequestMagicLinkAsync(string email)
+        {
+            var raw = NativeUtil.InvokeUnary(_bindings.amba_auth_request_magic_link, email, _bindings);
+            if (raw != null) JsonUtil.ThrowFromRaw(raw);
+            return Task.CompletedTask;
+        }
+
+        /// <summary>
+        /// Exchange a magic-link <paramref name="token"/> for a session.
+        /// Maps to <c>POST /v1/client/auth/magic-link/verify</c>.
+        /// </summary>
+        public Task<JToken> VerifyMagicLinkAsync(string token)
+        {
+            var raw = NativeUtil.InvokeUnary(_bindings.amba_auth_verify_magic_link, token, _bindings);
+            var result = JsonUtil.ExpectJson(raw);
+            NotifyAuthSubscribers(SnapshotSession(result));
+            return Task.FromResult(result);
+        }
+
+        /// <summary>
+        /// Link an external identity (<paramref name="provider"/> = "apple" /
+        /// "google" / "email" / …) to the currently-signed-in user. Used
+        /// to upgrade an anonymous session into an identified one without
+        /// losing local state. Maps to <c>POST /v1/client/auth/link</c>.
+        /// </summary>
+        public Task<JToken> LinkAccountAsync(string provider, string credential)
+        {
+            var raw = NativeUtil.InvokeBinary(_bindings.amba_auth_link_account, provider, credential, _bindings);
+            var result = JsonUtil.ExpectJson(raw);
+            NotifyAuthSubscribers(SnapshotSession(result));
+            return Task.FromResult(result);
+        }
 
         // ── Phase-A parity helpers ────────────────────────────────────
 
@@ -551,6 +714,15 @@ namespace Layers.Amba
             }
         }
 
+        /// <summary>
+        /// Internal entry point so <see cref="AmbaClient.ResetAsync"/> can
+        /// fan out the same "session cleared" notification that
+        /// <see cref="SignOutAsync"/> emits. Kept internal because reset is
+        /// the only legitimate non-auth caller — every other state change
+        /// goes through the auth methods on this namespace.
+        /// </summary>
+        internal void NotifyAuthSubscribersForReset() => NotifyAuthSubscribers(null);
+
         private static Session SnapshotSession(JToken authResult)
         {
             if (authResult == null || authResult.Type != JTokenType.Object) return null;
@@ -623,6 +795,152 @@ namespace Layers.Amba
             if (raw != null) JsonUtil.MaybeThrow(raw);
             return Task.CompletedTask;
         }
+
+        /// <summary>
+        /// Vector-search the collection. <paramref name="vector"/> is the
+        /// query embedding, <paramref name="k"/> the top-k count.
+        /// <paramref name="filter"/> is an optional Filter — see
+        /// <see cref="NormalizeFilter"/> for the accepted shapes
+        /// (recursive Filter tree, or shorthand <c>{column: value}</c>
+        /// joined with AND).
+        /// The Rust core expects an options JSON of shape
+        /// <c>{"vector_field":"embedding","query_vector":[…],"k":N,"filter"?:…}</c>;
+        /// the wrapper marshals <paramref name="vectorField"/> ("embedding"
+        /// by default).
+        /// </summary>
+        public Task<JToken> FindNearestAsync(string name, IEnumerable<float> vector, int k, Dictionary<string, object> filter = null, string vectorField = "embedding")
+        {
+            if (vector == null) throw new ArgumentNullException(nameof(vector));
+            var options = new Dictionary<string, object>
+            {
+                ["vector_field"] = vectorField,
+                ["query_vector"] = new List<float>(vector),
+                ["k"] = k,
+            };
+            var normalized = NormalizeFilter(filter);
+            if (normalized != null) options["filter"] = normalized;
+            var optionsJson = JsonConvert.SerializeObject(options);
+            return Task.FromResult(JsonUtil.ExpectJson(
+                NativeUtil.InvokeBinary(_bindings.amba_collections_find_nearest, name, optionsJson, _bindings)));
+        }
+
+        /// <summary>
+        /// Count rows in <paramref name="name"/>. <paramref name="filter"/>
+        /// is optional — pass null for an unfiltered count, a recursive
+        /// Filter tree, or a shorthand <c>{column: value}</c> dictionary
+        /// (each entry becomes a <c>{column, op:"eq", value}</c> condition,
+        /// joined with AND). Returns the raw <c>{"data":{"count":N}}</c>
+        /// envelope as a <see cref="JToken"/>.
+        /// </summary>
+        public Task<JToken> CountAsync(string name, Dictionary<string, object> filter = null)
+        {
+            var normalized = NormalizeFilter(filter);
+            string filterJson = normalized != null ? JsonConvert.SerializeObject(normalized) : null;
+            return Task.FromResult(JsonUtil.ExpectJson(
+                NativeUtil.InvokeBinary(_bindings.amba_collections_count, name, filterJson, _bindings)));
+        }
+
+        // ── filter normalization ─────────────────────────────────────────
+        //
+        // The Rust core (`sdks/core/src/collections.rs::Filter`) deserializes
+        // an `#[serde(untagged)]` enum:
+        //
+        //   - Condition: { "column": "...", "op": "...", "value": ... }
+        //   - And:       { "and": [ Filter, ... ] }
+        //   - Or:        { "or":  [ Filter, ... ] }
+        //   - Not:       { "not": Filter }
+        //
+        // Customers calling `CountAsync("posts", { ["author_id"] = "u_1" })`
+        // expect that to mean "WHERE author_id = 'u_1'" — but a flat
+        // `{ "author_id": "u_1" }` is none of the Filter variants, so the
+        // FFI rejects it with "invalid filter shape". We translate the
+        // shorthand into the canonical tree shape on the way out.
+        //
+        // Pass-through (no rewrite) when the dict is already a recognized
+        // Filter shape — exactly one key, named `and` / `or` / `not`, or
+        // the two/three-key `{column, op[, value]}` Condition. Anything else
+        // is treated as shorthand and folded into an AND of `eq` conditions.
+        //
+        // Extra keys alongside a recognized variant are a hard error rather
+        // than a silent pass-through. The Rust core uses
+        // `#[serde(untagged)]` on `Filter`, which silently drops fields
+        // unknown to the matched variant — so shipping
+        // `{column, op, value, author_id}` to FFI would succeed without ever
+        // applying the `author_id` constraint and return wrong rows /
+        // counts. Throw instead so the customer learns at the call site.
+        internal static object NormalizeFilter(Dictionary<string, object> filter)
+        {
+            if (filter == null || filter.Count == 0) return null;
+
+            if (filter.Count == 1)
+            {
+                foreach (var kv in filter)
+                {
+                    if (kv.Key == "and" || kv.Key == "or" || kv.Key == "not") return filter;
+                }
+            }
+
+            // Reject mixed dicts that contain a structural Filter key
+            // (`and` / `or` / `not`) alongside other keys — Rust's untagged
+            // deserializer would silently drop the structural variant or
+            // the extras, depending on order.
+            bool hasStructural = filter.ContainsKey("and") || filter.ContainsKey("or") || filter.ContainsKey("not");
+            if (hasStructural && filter.Count > 1)
+            {
+                throw new ArgumentException(
+                    "Filter dictionary mixes a structural key ('and' / 'or' / 'not') with other keys; wrap the extras in their own Filter node instead.",
+                    nameof(filter));
+            }
+
+            // Condition shape: requires both `column` and `op`. `value` is
+            // optional on the Rust side (`is_null` / `is_not_null` carry no
+            // value), so don't require it. Any extra keys are a hard error
+            // — see the comment above re: silent field-drop.
+            //
+            // The presence of EITHER `column` or `op` triggers the Condition
+            // path: a half-shaped dict (e.g. `{column:"x", author_id:"y"}`
+            // missing `op`, or `{op:"eq", value:1}` missing `column`) would
+            // otherwise silently fall through to the shorthand path and
+            // ship spurious `{column:"column", op:"eq", value:"x"}`
+            // conditions to the FFI — wrong rows, no error. Reject instead.
+            bool hasColumn = filter.ContainsKey("column");
+            bool hasOp = filter.ContainsKey("op");
+            if (hasColumn || hasOp)
+            {
+                if (!(hasColumn && hasOp))
+                {
+                    throw new ArgumentException(
+                        hasColumn
+                            ? "Filter dictionary has 'column' but is missing 'op'; Condition shape requires both. Use shorthand `{ \"col\": value }` for equality, or supply an explicit `op`."
+                            : "Filter dictionary has 'op' but is missing 'column'; Condition shape requires both.",
+                        nameof(filter));
+                }
+                foreach (var kv in filter)
+                {
+                    if (kv.Key != "column" && kv.Key != "op" && kv.Key != "value")
+                    {
+                        throw new ArgumentException(
+                            $"Filter Condition dictionary has unexpected key '{kv.Key}' alongside 'column'/'op'; only 'value' is allowed. Move extra constraints into a separate Condition wrapped in an 'and'.",
+                            nameof(filter));
+                    }
+                }
+                return filter;
+            }
+
+            // Shorthand: every entry becomes `{column, op:"eq", value}`.
+            var conditions = new List<Dictionary<string, object>>(filter.Count);
+            foreach (var kv in filter)
+            {
+                conditions.Add(new Dictionary<string, object>
+                {
+                    ["column"] = kv.Key,
+                    ["op"] = "eq",
+                    ["value"] = kv.Value,
+                });
+            }
+            if (conditions.Count == 1) return conditions[0];
+            return new Dictionary<string, object> { ["and"] = conditions };
+        }
     }
 
     public class StorageNamespace
@@ -648,6 +966,51 @@ namespace Layers.Amba
 
         public Task<JToken> CommitAsync(string uploadId, string assetId) =>
             Task.FromResult(JsonUtil.ExpectJson(NativeUtil.InvokeBinary(_bindings.amba_storage_commit, uploadId, assetId, _bindings)));
+
+        /// <summary>List media assets, optionally filtered by <paramref name="prefix"/>. Null prefix returns all.</summary>
+        public Task<JToken> ListAsync(string prefix = null) =>
+            Task.FromResult(JsonUtil.ExpectJson(NativeUtil.InvokeUnary(_bindings.amba_storage_list, prefix, _bindings)));
+
+        /// <summary>Delete the asset identified by <paramref name="assetId"/>.</summary>
+        public Task DeleteAsync(string assetId)
+        {
+            var raw = NativeUtil.InvokeUnary(_bindings.amba_storage_delete, assetId, _bindings);
+            if (raw != null) JsonUtil.MaybeThrow(raw);
+            return Task.CompletedTask;
+        }
+
+        /// <summary>
+        /// Download the bytes of an asset. The Rust core returns a JSON
+        /// envelope of shape <c>{"data":"&lt;base64&gt;"}</c> — the wrapper
+        /// decodes the base64 payload and returns raw bytes.
+        /// </summary>
+        /// <remarks>
+        /// A corrupt or non-base64 <c>data</c> field is surfaced as an
+        /// <see cref="AmbaApiError"/> (code <c>UNKNOWN_ERROR</c>) rather
+        /// than the raw <see cref="FormatException"/> — keeps the storage
+        /// failure surface uniform with the rest of the namespace, which
+        /// routes every failure through <see cref="JsonUtil"/>.
+        /// </remarks>
+        public Task<byte[]> DownloadAsync(string assetId)
+        {
+            var raw = NativeUtil.InvokeUnary(_bindings.amba_storage_download, assetId, _bindings);
+            var token = JsonUtil.ExpectJson(raw);
+            if (token.Type != JTokenType.Object)
+                throw new AmbaApiError("UNKNOWN_ERROR", $"unexpected download envelope: {raw}");
+            var data = token["data"];
+            if (data == null || data.Type != JTokenType.String)
+                throw new AmbaApiError("UNKNOWN_ERROR", $"download envelope missing data: {raw}");
+            try
+            {
+                return Task.FromResult(Convert.FromBase64String((string)data));
+            }
+            catch (FormatException err)
+            {
+                throw new AmbaApiError(
+                    "UNKNOWN_ERROR",
+                    $"download envelope data is not valid base64: {err.Message}");
+            }
+        }
     }
 
     public class PushNamespace
@@ -739,6 +1102,20 @@ namespace Layers.Amba
 
         public Task<JToken> FetchAsync() =>
             Task.FromResult(JsonUtil.ExpectJson(NativeUtil.CallReturnString(_bindings.amba_flags_fetch, _bindings)));
+
+        /// <summary>
+        /// Single-flag lookup (SDK 4.0). Wraps
+        /// <c>GET /v1/client/flags/{key}</c>. Returns <c>null</c> for
+        /// unknown or disabled keys; throws on other failures.
+        /// </summary>
+        public Task<JToken?> GetAsync(string key)
+        {
+            var raw = NativeUtil.InvokeUnary(_bindings.amba_flags_get, key, _bindings);
+            var env = JsonUtil.ExpectJson(raw);
+            var data = env["data"];
+            if (data == null || data.Type == JTokenType.Null) return Task.FromResult<JToken?>(null);
+            return Task.FromResult<JToken?>(data);
+        }
     }
 
     // ── gamification ─────────────────────────────────────────────────
@@ -914,6 +1291,35 @@ namespace Layers.Amba
             if (raw != null) JsonUtil.ThrowFromRaw(raw);
             return Task.CompletedTask;
         }
+
+        /// <summary>
+        /// Unfriend by the other user's id (SDK 4.0). Wraps
+        /// <c>DELETE /v1/client/friends/by-user/{userId}</c>. Server
+        /// preserves blocked rows; use <see cref="UnblockUserAsync"/>
+        /// to clear those instead.
+        /// </summary>
+        public Task RemoveFriendAsync(string userId)
+        {
+            var raw = NativeUtil.InvokeUnary(_bindings.amba_friends_remove_friend, userId, _bindings);
+            if (raw != null) JsonUtil.ThrowFromRaw(raw);
+            return Task.CompletedTask;
+        }
+
+        /// <summary>Send a friend request to <paramref name="userId"/>. Returns the new Friendship row.</summary>
+        public Task<JToken> SendRequestAsync(string userId) =>
+            Task.FromResult(JsonUtil.ExpectJson(NativeUtil.InvokeUnary(_bindings.amba_friends_send_request, userId, _bindings)));
+
+        /// <summary>Accept the friend request identified by <paramref name="friendshipId"/>.</summary>
+        public Task<JToken> AcceptRequestAsync(string friendshipId) =>
+            Task.FromResult(JsonUtil.ExpectJson(NativeUtil.InvokeUnary(_bindings.amba_friends_accept_request, friendshipId, _bindings)));
+
+        /// <summary>Decline the friend request identified by <paramref name="friendshipId"/>.</summary>
+        public Task DeclineRequestAsync(string friendshipId)
+        {
+            var raw = NativeUtil.InvokeUnary(_bindings.amba_friends_decline_request, friendshipId, _bindings);
+            if (raw != null) JsonUtil.MaybeThrow(raw);
+            return Task.CompletedTask;
+        }
     }
 
     public class GroupsNamespace
@@ -968,13 +1374,88 @@ namespace Layers.Amba
         public Task<JToken> ConversationsAsync() =>
             Task.FromResult(JsonUtil.ExpectJson(NativeUtil.CallReturnString(_bindings.amba_messaging_get_conversations, _bindings)));
 
-        public Task<JToken> GetMessageAsync(string id) =>
-            Task.FromResult(JsonUtil.ExpectJson(NativeUtil.InvokeUnary(_bindings.amba_messaging_get_message, id, _bindings)));
+        /// <summary>
+        /// Create a new conversation. <paramref name="participants"/> is the
+        /// list of user ids to include; <paramref name="metadata"/> can hold
+        /// optional <c>type</c> ("direct" / "group") and <c>name</c> keys
+        /// (server's <c>CreateConversationInput</c> shape).
+        /// </summary>
+        /// <remarks>
+        /// <paramref name="metadata"/> may not contain a <c>participant_ids</c>
+        /// key — the participant list is owned by the
+        /// <paramref name="participants"/> argument. Passing both is a
+        /// programming error and throws <see cref="ArgumentException"/>
+        /// rather than silently letting metadata clobber the typed argument.
+        /// </remarks>
+        public Task<JToken> CreateConversationAsync(IEnumerable<string> participants, Dictionary<string, object> metadata = null)
+        {
+            if (participants == null) throw new ArgumentNullException(nameof(participants));
+            if (metadata != null && metadata.ContainsKey("participant_ids"))
+            {
+                throw new ArgumentException(
+                    "metadata must not contain a 'participant_ids' key — pass participants via the 'participants' argument instead.",
+                    nameof(metadata));
+            }
+            var body = new Dictionary<string, object>
+            {
+                ["participant_ids"] = new List<string>(participants),
+            };
+            if (metadata != null)
+            {
+                foreach (var kv in metadata) body[kv.Key] = kv.Value;
+            }
+            var json = JsonConvert.SerializeObject(body);
+            return Task.FromResult(JsonUtil.ExpectJson(
+                NativeUtil.InvokeUnary(_bindings.amba_messaging_create_conversation, json, _bindings)));
+        }
+
+        /// <summary>
+        /// List messages in <paramref name="conversationId"/>. Pass <c>null</c>
+        /// for <paramref name="limit"/> / <paramref name="offset"/> to defer
+        /// to server defaults. The FFI uses the <c>u32::MAX</c> sentinel to
+        /// mean "not provided" so the call shape stays ABI-stable.
+        /// </summary>
+        public Task<JToken> ListMessagesAsync(string conversationId, uint? limit = null, uint? offset = null)
+        {
+            uint l = limit ?? uint.MaxValue;
+            uint o = offset ?? uint.MaxValue;
+            IntPtr c = NativeUtil.MarshalUtf8(conversationId);
+            try
+            {
+                var ptr = _bindings.amba_messaging_list_messages(c, l, o);
+                return Task.FromResult(JsonUtil.ExpectJson(NativeUtil.PtrToStringAndFree(ptr, _bindings)));
+            }
+            finally { Marshal.FreeHGlobal(c); }
+        }
+
+        /// <summary>
+        /// Fetch a single message by id. The Rust core paginates
+        /// <c>list_messages</c> internally and filters by id (the REST API
+        /// has no by-id GET route). Returns the literal <c>null</c> JSON
+        /// when the message isn't found in the first 5,000 entries.
+        /// </summary>
+        /// <remarks>
+        /// Before SDK 4.0 this called a non-existent <c>amba_messaging_get_message</c>
+        /// symbol — first call crashed with <c>EntryPointNotFoundException</c>.
+        /// Phase A implemented the symbol with a <c>(conversation_id, message_id)</c>
+        /// signature; the wrapper now passes both args.
+        /// </remarks>
+        public Task<JToken> GetMessageAsync(string conversationId, string messageId) =>
+            Task.FromResult(JsonUtil.ExpectJson(
+                NativeUtil.InvokeBinary(_bindings.amba_messaging_get_message, conversationId, messageId, _bindings)));
 
         public Task<JToken> SendMessageAsync(Dictionary<string, object> request)
         {
             var json = JsonConvert.SerializeObject(request);
             return Task.FromResult(JsonUtil.ExpectJson(NativeUtil.InvokeUnary(_bindings.amba_messaging_send_message, json, _bindings)));
+        }
+
+        /// <summary>Mark all messages in <paramref name="conversationId"/> as read for the current user.</summary>
+        public Task MarkReadAsync(string conversationId)
+        {
+            var raw = NativeUtil.InvokeUnary(_bindings.amba_messaging_mark_read, conversationId, _bindings);
+            if (raw != null) JsonUtil.MaybeThrow(raw);
+            return Task.CompletedTask;
         }
     }
 
@@ -1068,6 +1549,10 @@ namespace Layers.Amba
 
         public Task<JToken> ListAsync() =>
             Task.FromResult(JsonUtil.ExpectJson(NativeUtil.CallReturnString(_bindings.amba_catalog_list, _bindings)));
+
+        /// <summary>Fetch a single catalog item by <paramref name="id"/>. NEW in 4.0.</summary>
+        public Task<JToken> GetAsync(string id) =>
+            Task.FromResult(JsonUtil.ExpectJson(NativeUtil.InvokeUnary(_bindings.amba_catalog_get, id, _bindings)));
     }
 
     public class ContentNamespace
@@ -1151,6 +1636,106 @@ namespace Layers.Amba
 
         public Task<JToken> CompleteAsync() =>
             Task.FromResult(JsonUtil.ExpectJson(NativeUtil.CallReturnString(_bindings.amba_onboarding_complete, _bindings)));
+    }
+
+    // ═══════════════════════════════════════════════════════════════
+    // 4.0 additions: users / sessions / sync / leagues
+    // ═══════════════════════════════════════════════════════════════
+
+    public class UsersNamespace
+    {
+        private readonly INativeMethods _bindings;
+        public UsersNamespace(INativeMethods bindings) { _bindings = bindings; }
+
+        /// <summary>
+        /// Fetch a user record. <paramref name="userId"/> defaults to
+        /// <c>null</c> which resolves to the current authenticated user
+        /// (<c>GET /v1/client/users/me</c>).
+        /// </summary>
+        public Task<JToken> GetAsync(string userId = null) =>
+            Task.FromResult(JsonUtil.ExpectJson(NativeUtil.InvokeUnary(_bindings.amba_users_get, userId, _bindings)));
+
+        /// <summary>
+        /// Patch the current user's profile. <paramref name="patch"/> is a
+        /// shallow dictionary of writable fields → new values.
+        /// <paramref name="userId"/> is reserved for future admin-edit
+        /// flows; defaults to current user.
+        /// </summary>
+        public Task<JToken> UpdateAsync(Dictionary<string, object> patch, string userId = null)
+        {
+            if (patch == null) throw new ArgumentNullException(nameof(patch));
+            var json = JsonConvert.SerializeObject(patch);
+            return Task.FromResult(JsonUtil.ExpectJson(
+                NativeUtil.InvokeBinary(_bindings.amba_users_update, userId, json, _bindings)));
+        }
+    }
+
+    public class SessionsNamespace
+    {
+        private readonly INativeMethods _bindings;
+        public SessionsNamespace(INativeMethods bindings) { _bindings = bindings; }
+
+        /// <summary>List active sessions for the current user.</summary>
+        public Task<JToken> ListAsync() =>
+            Task.FromResult(JsonUtil.ExpectJson(NativeUtil.CallReturnString(_bindings.amba_sessions_list, _bindings)));
+
+        /// <summary>Revoke <paramref name="sessionId"/> — invalidates that session immediately.</summary>
+        public Task RevokeAsync(string sessionId)
+        {
+            var raw = NativeUtil.InvokeUnary(_bindings.amba_sessions_revoke, sessionId, _bindings);
+            if (raw != null) JsonUtil.MaybeThrow(raw);
+            return Task.CompletedTask;
+        }
+    }
+
+    public class SyncNamespace
+    {
+        private readonly INativeMethods _bindings;
+        public SyncNamespace(INativeMethods bindings) { _bindings = bindings; }
+
+        /// <summary>
+        /// Push an offline-recorded batch of <paramref name="changes"/>
+        /// for server-wins conflict resolution. Returns
+        /// <c>{ applied, conflicts }</c>.
+        /// </summary>
+        public Task<JToken> PushChangesAsync(IEnumerable<Dictionary<string, object>> changes)
+        {
+            if (changes == null) throw new ArgumentNullException(nameof(changes));
+            var json = JsonConvert.SerializeObject(changes);
+            return Task.FromResult(JsonUtil.ExpectJson(
+                NativeUtil.InvokeUnary(_bindings.amba_sync_push_changes, json, _bindings)));
+        }
+
+        /// <summary>
+        /// Pull server-side changes for <paramref name="entityType"/>
+        /// (e.g. "collections.posts"), optionally since
+        /// <paramref name="checkpointToken"/>. Returns the changes plus a
+        /// new cursor.
+        /// </summary>
+        public Task<JToken> PullChangesAsync(string entityType, string checkpointToken = null)
+        {
+            if (string.IsNullOrEmpty(entityType))
+                throw new ArgumentException("entityType is required", nameof(entityType));
+            var payload = new Dictionary<string, object> { ["entity_type"] = entityType };
+            if (checkpointToken != null) payload["checkpoint_token"] = checkpointToken;
+            var json = JsonConvert.SerializeObject(payload);
+            return Task.FromResult(JsonUtil.ExpectJson(
+                NativeUtil.InvokeUnary(_bindings.amba_sync_pull_changes, json, _bindings)));
+        }
+    }
+
+    public class LeaguesNamespace
+    {
+        private readonly INativeMethods _bindings;
+        public LeaguesNamespace(INativeMethods bindings) { _bindings = bindings; }
+
+        /// <summary>Get the current user's league membership.</summary>
+        public Task<JToken> MeAsync() =>
+            Task.FromResult(JsonUtil.ExpectJson(NativeUtil.CallReturnString(_bindings.amba_leagues_me, _bindings)));
+
+        /// <summary>Get the current user's cohort (peers in the same tier).</summary>
+        public Task<JToken> CohortAsync() =>
+            Task.FromResult(JsonUtil.ExpectJson(NativeUtil.CallReturnString(_bindings.amba_leagues_cohort, _bindings)));
     }
 
     // ═══════════════════════════════════════════════════════════════
@@ -1456,6 +2041,7 @@ namespace Layers.Amba
     public interface INativeMethods
     {
         IntPtr amba_init(IntPtr configJson);
+        IntPtr amba_reset();
         IntPtr amba_anonymous_id();
         IntPtr amba_app_user_id();
         uint amba_is_authenticated();
@@ -1468,18 +2054,43 @@ namespace Layers.Amba
         IntPtr amba_auth_sign_in_with_email(IntPtr email, IntPtr password);
         IntPtr amba_auth_sign_up_with_email(IntPtr email, IntPtr password);
         IntPtr amba_auth_sign_in_with_social(IntPtr provider, IntPtr idToken);
+        IntPtr amba_auth_request_email_otp(IntPtr email);
+        IntPtr amba_auth_verify_email_otp(IntPtr email, IntPtr code);
+        IntPtr amba_auth_request_sms_otp(IntPtr phone);
+        IntPtr amba_auth_verify_sms_otp(IntPtr phone, IntPtr code);
         IntPtr amba_auth_sign_out(uint rotateAnonymousId);
         IntPtr amba_auth_refresh();
         IntPtr amba_auth_me();
+        IntPtr amba_auth_request_magic_link(IntPtr email);
+        IntPtr amba_auth_verify_magic_link(IntPtr token);
+        IntPtr amba_auth_link_account(IntPtr provider, IntPtr credential);
+
+        // ── users / sessions / sync / leagues (4.0) ──
+        IntPtr amba_users_get(IntPtr userId);
+        IntPtr amba_users_update(IntPtr userId, IntPtr patchJson);
+
+        IntPtr amba_sessions_list();
+        IntPtr amba_sessions_revoke(IntPtr sessionId);
+
+        IntPtr amba_sync_push_changes(IntPtr changesJson);
+        IntPtr amba_sync_pull_changes(IntPtr sinceJson);
+
+        IntPtr amba_leagues_me();
+        IntPtr amba_leagues_cohort();
 
         IntPtr amba_collections_find(IntPtr collection, IntPtr optionsJson);
         IntPtr amba_collections_find_one(IntPtr collection, IntPtr id);
         IntPtr amba_collections_insert(IntPtr collection, IntPtr rowJson);
         IntPtr amba_collections_update(IntPtr collection, IntPtr id, IntPtr setJson);
         IntPtr amba_collections_delete(IntPtr collection, IntPtr id);
+        IntPtr amba_collections_find_nearest(IntPtr collection, IntPtr optionsJson);
+        IntPtr amba_collections_count(IntPtr collection, IntPtr filterJson);
 
         IntPtr amba_storage_presign(IntPtr bucket, IntPtr filename, IntPtr mimeType, ulong sizeBytes, int retentionDays);
         IntPtr amba_storage_commit(IntPtr uploadId, IntPtr assetId);
+        IntPtr amba_storage_list(IntPtr prefix);
+        IntPtr amba_storage_delete(IntPtr assetId);
+        IntPtr amba_storage_download(IntPtr assetId);
 
         IntPtr amba_push_register(IntPtr token, IntPtr platform, IntPtr bundleId);
         IntPtr amba_push_subscribe(IntPtr topic);
@@ -1494,6 +2105,7 @@ namespace Layers.Amba
 
         IntPtr amba_config_fetch();
         IntPtr amba_flags_fetch();
+        IntPtr amba_flags_get(IntPtr key);
 
         // ── gamification ──
         IntPtr amba_achievements_get_all();
@@ -1535,6 +2147,10 @@ namespace Layers.Amba
         IntPtr amba_friends_block_user(IntPtr userId);
         IntPtr amba_friends_unblock_user(IntPtr userId);
         IntPtr amba_friends_remove_block(IntPtr friendshipId);
+        IntPtr amba_friends_remove_friend(IntPtr userId);
+        IntPtr amba_friends_send_request(IntPtr userId);
+        IntPtr amba_friends_accept_request(IntPtr friendshipId);
+        IntPtr amba_friends_decline_request(IntPtr friendshipId);
 
         IntPtr amba_groups_create(IntPtr paramsJson);
         IntPtr amba_groups_get(IntPtr id);
@@ -1546,7 +2162,16 @@ namespace Layers.Amba
         IntPtr amba_groups_invite(IntPtr id, IntPtr userId);
 
         IntPtr amba_messaging_get_conversations();
-        IntPtr amba_messaging_get_message(IntPtr id);
+        IntPtr amba_messaging_create_conversation(IntPtr requestJson);
+        IntPtr amba_messaging_list_messages(IntPtr conversationId, uint limit, uint offset);
+        /// <summary>
+        /// Phase A signature: <c>(conversation_id, message_id)</c>. The Rust
+        /// core paginates <c>list_messages</c> internally and filters by id.
+        /// Returns the message envelope or the literal <c>null</c> when not
+        /// found.
+        /// </summary>
+        IntPtr amba_messaging_get_message(IntPtr conversationId, IntPtr messageId);
+        IntPtr amba_messaging_mark_read(IntPtr conversationId);
         IntPtr amba_messaging_send_message(IntPtr requestJson);
 
         IntPtr amba_moderation_report_user(IntPtr requestJson);
@@ -1567,6 +2192,7 @@ namespace Layers.Amba
 
         // ── lifecycle ──
         IntPtr amba_catalog_list();
+        IntPtr amba_catalog_get(IntPtr itemId);
 
         IntPtr amba_content_get_today(IntPtr channel);
         /// <summary>
@@ -1598,6 +2224,7 @@ namespace Layers.Amba
     public sealed class DefaultNativeMethods : INativeMethods
     {
         public IntPtr amba_init(IntPtr configJson) => NativeMethods.amba_init(configJson);
+        public IntPtr amba_reset() => NativeMethods.amba_reset();
         public IntPtr amba_anonymous_id() => NativeMethods.amba_anonymous_id();
         public IntPtr amba_app_user_id() => NativeMethods.amba_app_user_id();
         public uint amba_is_authenticated() => NativeMethods.amba_is_authenticated();
@@ -1614,10 +2241,41 @@ namespace Layers.Amba
             NativeMethods.amba_auth_sign_up_with_email(email, password);
         public IntPtr amba_auth_sign_in_with_social(IntPtr provider, IntPtr idToken) =>
             NativeMethods.amba_auth_sign_in_with_social(provider, idToken);
+        public IntPtr amba_auth_request_email_otp(IntPtr email) =>
+            NativeMethods.amba_auth_request_email_otp(email);
+        public IntPtr amba_auth_verify_email_otp(IntPtr email, IntPtr code) =>
+            NativeMethods.amba_auth_verify_email_otp(email, code);
+        public IntPtr amba_auth_request_sms_otp(IntPtr phone) =>
+            NativeMethods.amba_auth_request_sms_otp(phone);
+        public IntPtr amba_auth_verify_sms_otp(IntPtr phone, IntPtr code) =>
+            NativeMethods.amba_auth_verify_sms_otp(phone, code);
         public IntPtr amba_auth_sign_out(uint rotateAnonymousId) =>
             NativeMethods.amba_auth_sign_out(rotateAnonymousId);
         public IntPtr amba_auth_refresh() => NativeMethods.amba_auth_refresh();
         public IntPtr amba_auth_me() => NativeMethods.amba_auth_me();
+        public IntPtr amba_auth_request_magic_link(IntPtr email) =>
+            NativeMethods.amba_auth_request_magic_link(email);
+        public IntPtr amba_auth_verify_magic_link(IntPtr token) =>
+            NativeMethods.amba_auth_verify_magic_link(token);
+        public IntPtr amba_auth_link_account(IntPtr provider, IntPtr credential) =>
+            NativeMethods.amba_auth_link_account(provider, credential);
+
+        // ── users / sessions / sync / leagues (4.0) ──
+        public IntPtr amba_users_get(IntPtr userId) => NativeMethods.amba_users_get(userId);
+        public IntPtr amba_users_update(IntPtr userId, IntPtr patchJson) =>
+            NativeMethods.amba_users_update(userId, patchJson);
+
+        public IntPtr amba_sessions_list() => NativeMethods.amba_sessions_list();
+        public IntPtr amba_sessions_revoke(IntPtr sessionId) =>
+            NativeMethods.amba_sessions_revoke(sessionId);
+
+        public IntPtr amba_sync_push_changes(IntPtr changesJson) =>
+            NativeMethods.amba_sync_push_changes(changesJson);
+        public IntPtr amba_sync_pull_changes(IntPtr sinceJson) =>
+            NativeMethods.amba_sync_pull_changes(sinceJson);
+
+        public IntPtr amba_leagues_me() => NativeMethods.amba_leagues_me();
+        public IntPtr amba_leagues_cohort() => NativeMethods.amba_leagues_cohort();
 
         public IntPtr amba_collections_find(IntPtr collection, IntPtr optionsJson) =>
             NativeMethods.amba_collections_find(collection, optionsJson);
@@ -1629,11 +2287,18 @@ namespace Layers.Amba
             NativeMethods.amba_collections_update(collection, id, setJson);
         public IntPtr amba_collections_delete(IntPtr collection, IntPtr id) =>
             NativeMethods.amba_collections_delete(collection, id);
+        public IntPtr amba_collections_find_nearest(IntPtr collection, IntPtr optionsJson) =>
+            NativeMethods.amba_collections_find_nearest(collection, optionsJson);
+        public IntPtr amba_collections_count(IntPtr collection, IntPtr filterJson) =>
+            NativeMethods.amba_collections_count(collection, filterJson);
 
         public IntPtr amba_storage_presign(IntPtr bucket, IntPtr filename, IntPtr mimeType, ulong sizeBytes, int retentionDays) =>
             NativeMethods.amba_storage_presign(bucket, filename, mimeType, sizeBytes, retentionDays);
         public IntPtr amba_storage_commit(IntPtr uploadId, IntPtr assetId) =>
             NativeMethods.amba_storage_commit(uploadId, assetId);
+        public IntPtr amba_storage_list(IntPtr prefix) => NativeMethods.amba_storage_list(prefix);
+        public IntPtr amba_storage_delete(IntPtr assetId) => NativeMethods.amba_storage_delete(assetId);
+        public IntPtr amba_storage_download(IntPtr assetId) => NativeMethods.amba_storage_download(assetId);
 
         public IntPtr amba_push_register(IntPtr token, IntPtr platform, IntPtr bundleId) =>
             NativeMethods.amba_push_register(token, platform, bundleId);
@@ -1653,6 +2318,7 @@ namespace Layers.Amba
 
         public IntPtr amba_config_fetch() => NativeMethods.amba_config_fetch();
         public IntPtr amba_flags_fetch() => NativeMethods.amba_flags_fetch();
+        public IntPtr amba_flags_get(IntPtr key) => NativeMethods.amba_flags_get(key);
 
         // ── gamification ──
         public IntPtr amba_achievements_get_all() => NativeMethods.amba_achievements_get_all();
@@ -1696,6 +2362,10 @@ namespace Layers.Amba
         public IntPtr amba_friends_block_user(IntPtr userId) => NativeMethods.amba_friends_block_user(userId);
         public IntPtr amba_friends_unblock_user(IntPtr userId) => NativeMethods.amba_friends_unblock_user(userId);
         public IntPtr amba_friends_remove_block(IntPtr friendshipId) => NativeMethods.amba_friends_remove_block(friendshipId);
+        public IntPtr amba_friends_remove_friend(IntPtr userId) => NativeMethods.amba_friends_remove_friend(userId);
+        public IntPtr amba_friends_send_request(IntPtr userId) => NativeMethods.amba_friends_send_request(userId);
+        public IntPtr amba_friends_accept_request(IntPtr friendshipId) => NativeMethods.amba_friends_accept_request(friendshipId);
+        public IntPtr amba_friends_decline_request(IntPtr friendshipId) => NativeMethods.amba_friends_decline_request(friendshipId);
 
         public IntPtr amba_groups_create(IntPtr paramsJson) => NativeMethods.amba_groups_create(paramsJson);
         public IntPtr amba_groups_get(IntPtr id) => NativeMethods.amba_groups_get(id);
@@ -1707,7 +2377,14 @@ namespace Layers.Amba
         public IntPtr amba_groups_invite(IntPtr id, IntPtr userId) => NativeMethods.amba_groups_invite(id, userId);
 
         public IntPtr amba_messaging_get_conversations() => NativeMethods.amba_messaging_get_conversations();
-        public IntPtr amba_messaging_get_message(IntPtr id) => NativeMethods.amba_messaging_get_message(id);
+        public IntPtr amba_messaging_create_conversation(IntPtr requestJson) =>
+            NativeMethods.amba_messaging_create_conversation(requestJson);
+        public IntPtr amba_messaging_list_messages(IntPtr conversationId, uint limit, uint offset) =>
+            NativeMethods.amba_messaging_list_messages(conversationId, limit, offset);
+        public IntPtr amba_messaging_get_message(IntPtr conversationId, IntPtr messageId) =>
+            NativeMethods.amba_messaging_get_message(conversationId, messageId);
+        public IntPtr amba_messaging_mark_read(IntPtr conversationId) =>
+            NativeMethods.amba_messaging_mark_read(conversationId);
         public IntPtr amba_messaging_send_message(IntPtr requestJson) => NativeMethods.amba_messaging_send_message(requestJson);
 
         public IntPtr amba_moderation_report_user(IntPtr requestJson) => NativeMethods.amba_moderation_report_user(requestJson);
@@ -1728,6 +2405,7 @@ namespace Layers.Amba
 
         // ── lifecycle ──
         public IntPtr amba_catalog_list() => NativeMethods.amba_catalog_list();
+        public IntPtr amba_catalog_get(IntPtr itemId) => NativeMethods.amba_catalog_get(itemId);
 
         public IntPtr amba_content_get_today(IntPtr channel) => NativeMethods.amba_content_get_today(channel);
         public IntPtr amba_content_get_library(IntPtr channel, uint limit, IntPtr cursor) =>
@@ -1931,6 +2609,7 @@ namespace Layers.Amba
 #endif
 
         [DllImport(LIB)] public static extern IntPtr amba_init(IntPtr configJson);
+        [DllImport(LIB)] public static extern IntPtr amba_reset();
         [DllImport(LIB)] public static extern IntPtr amba_anonymous_id();
         [DllImport(LIB)] public static extern IntPtr amba_app_user_id();
         [DllImport(LIB)] public static extern uint amba_is_authenticated();
@@ -1943,18 +2622,43 @@ namespace Layers.Amba
         [DllImport(LIB)] public static extern IntPtr amba_auth_sign_in_with_email(IntPtr email, IntPtr password);
         [DllImport(LIB)] public static extern IntPtr amba_auth_sign_up_with_email(IntPtr email, IntPtr password);
         [DllImport(LIB)] public static extern IntPtr amba_auth_sign_in_with_social(IntPtr provider, IntPtr idToken);
+        [DllImport(LIB)] public static extern IntPtr amba_auth_request_email_otp(IntPtr email);
+        [DllImport(LIB)] public static extern IntPtr amba_auth_request_sms_otp(IntPtr phone);
+        [DllImport(LIB)] public static extern IntPtr amba_auth_verify_sms_otp(IntPtr phone, IntPtr code);
+        [DllImport(LIB)] public static extern IntPtr amba_auth_verify_email_otp(IntPtr email, IntPtr code);
         [DllImport(LIB)] public static extern IntPtr amba_auth_sign_out(uint rotateAnonymousId);
         [DllImport(LIB)] public static extern IntPtr amba_auth_refresh();
         [DllImport(LIB)] public static extern IntPtr amba_auth_me();
+        [DllImport(LIB)] public static extern IntPtr amba_auth_request_magic_link(IntPtr email);
+        [DllImport(LIB)] public static extern IntPtr amba_auth_verify_magic_link(IntPtr token);
+        [DllImport(LIB)] public static extern IntPtr amba_auth_link_account(IntPtr provider, IntPtr credential);
+
+        // ── users / sessions / sync / leagues (4.0) ──
+        [DllImport(LIB)] public static extern IntPtr amba_users_get(IntPtr userId);
+        [DllImport(LIB)] public static extern IntPtr amba_users_update(IntPtr userId, IntPtr patchJson);
+
+        [DllImport(LIB)] public static extern IntPtr amba_sessions_list();
+        [DllImport(LIB)] public static extern IntPtr amba_sessions_revoke(IntPtr sessionId);
+
+        [DllImport(LIB)] public static extern IntPtr amba_sync_push_changes(IntPtr changesJson);
+        [DllImport(LIB)] public static extern IntPtr amba_sync_pull_changes(IntPtr sinceJson);
+
+        [DllImport(LIB)] public static extern IntPtr amba_leagues_me();
+        [DllImport(LIB)] public static extern IntPtr amba_leagues_cohort();
 
         [DllImport(LIB)] public static extern IntPtr amba_collections_find(IntPtr collection, IntPtr optionsJson);
         [DllImport(LIB)] public static extern IntPtr amba_collections_find_one(IntPtr collection, IntPtr id);
         [DllImport(LIB)] public static extern IntPtr amba_collections_insert(IntPtr collection, IntPtr rowJson);
         [DllImport(LIB)] public static extern IntPtr amba_collections_update(IntPtr collection, IntPtr id, IntPtr setJson);
         [DllImport(LIB)] public static extern IntPtr amba_collections_delete(IntPtr collection, IntPtr id);
+        [DllImport(LIB)] public static extern IntPtr amba_collections_find_nearest(IntPtr collection, IntPtr optionsJson);
+        [DllImport(LIB)] public static extern IntPtr amba_collections_count(IntPtr collection, IntPtr filterJson);
 
         [DllImport(LIB)] public static extern IntPtr amba_storage_presign(IntPtr bucket, IntPtr filename, IntPtr mimeType, ulong sizeBytes, int retentionDays);
         [DllImport(LIB)] public static extern IntPtr amba_storage_commit(IntPtr uploadId, IntPtr assetId);
+        [DllImport(LIB)] public static extern IntPtr amba_storage_list(IntPtr prefix);
+        [DllImport(LIB)] public static extern IntPtr amba_storage_delete(IntPtr assetId);
+        [DllImport(LIB)] public static extern IntPtr amba_storage_download(IntPtr assetId);
 
         [DllImport(LIB)] public static extern IntPtr amba_push_register(IntPtr token, IntPtr platform, IntPtr bundleId);
         [DllImport(LIB)] public static extern IntPtr amba_push_subscribe(IntPtr topic);
@@ -1969,6 +2673,7 @@ namespace Layers.Amba
 
         [DllImport(LIB)] public static extern IntPtr amba_config_fetch();
         [DllImport(LIB)] public static extern IntPtr amba_flags_fetch();
+        [DllImport(LIB)] public static extern IntPtr amba_flags_get(IntPtr key);
 
         // ── gamification ──
         [DllImport(LIB)] public static extern IntPtr amba_achievements_get_all();
@@ -2010,6 +2715,10 @@ namespace Layers.Amba
         [DllImport(LIB)] public static extern IntPtr amba_friends_block_user(IntPtr userId);
         [DllImport(LIB)] public static extern IntPtr amba_friends_unblock_user(IntPtr userId);
         [DllImport(LIB)] public static extern IntPtr amba_friends_remove_block(IntPtr friendshipId);
+        [DllImport(LIB)] public static extern IntPtr amba_friends_remove_friend(IntPtr userId);
+        [DllImport(LIB)] public static extern IntPtr amba_friends_send_request(IntPtr userId);
+        [DllImport(LIB)] public static extern IntPtr amba_friends_accept_request(IntPtr friendshipId);
+        [DllImport(LIB)] public static extern IntPtr amba_friends_decline_request(IntPtr friendshipId);
 
         [DllImport(LIB)] public static extern IntPtr amba_groups_create(IntPtr paramsJson);
         [DllImport(LIB)] public static extern IntPtr amba_groups_get(IntPtr id);
@@ -2021,7 +2730,10 @@ namespace Layers.Amba
         [DllImport(LIB)] public static extern IntPtr amba_groups_invite(IntPtr id, IntPtr userId);
 
         [DllImport(LIB)] public static extern IntPtr amba_messaging_get_conversations();
-        [DllImport(LIB)] public static extern IntPtr amba_messaging_get_message(IntPtr id);
+        [DllImport(LIB)] public static extern IntPtr amba_messaging_create_conversation(IntPtr requestJson);
+        [DllImport(LIB)] public static extern IntPtr amba_messaging_list_messages(IntPtr conversationId, uint limit, uint offset);
+        [DllImport(LIB)] public static extern IntPtr amba_messaging_get_message(IntPtr conversationId, IntPtr messageId);
+        [DllImport(LIB)] public static extern IntPtr amba_messaging_mark_read(IntPtr conversationId);
         [DllImport(LIB)] public static extern IntPtr amba_messaging_send_message(IntPtr requestJson);
 
         [DllImport(LIB)] public static extern IntPtr amba_moderation_report_user(IntPtr requestJson);
@@ -2042,6 +2754,7 @@ namespace Layers.Amba
 
         // ── lifecycle ──
         [DllImport(LIB)] public static extern IntPtr amba_catalog_list();
+        [DllImport(LIB)] public static extern IntPtr amba_catalog_get(IntPtr itemId);
 
         [DllImport(LIB)] public static extern IntPtr amba_content_get_today(IntPtr channel);
         [DllImport(LIB)] public static extern IntPtr amba_content_get_library(IntPtr channel, uint limit, IntPtr cursor);

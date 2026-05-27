@@ -286,6 +286,365 @@ namespace Layers.Amba.Tests
             Assert.That((string)me["id"], Is.EqualTo("u_1"));
         }
 
+        // ── auth: OTP (4.0 coverage backfill) ────────────────────────
+
+        [Test]
+        public async System.Threading.Tasks.Task Auth_RequestEmailOtp_DispatchesEmail()
+        {
+            _fake.Enqueue("auth_request_email_otp", null);
+
+            await _client.Auth.RequestEmailOtpAsync("alice@example.com");
+
+            var call = _fake.Calls[0];
+            Assert.That(call.Name, Is.EqualTo("auth_request_email_otp"));
+            Assert.That(call.Args[0], Is.EqualTo("alice@example.com"));
+        }
+
+        [Test]
+        public void Auth_RequestEmailOtp_ThrowsOnErrorPayload()
+        {
+            _fake.Enqueue("auth_request_email_otp", "{\"error\":\"Rate limited: too many OTPs\"}");
+
+            var ex = Assert.ThrowsAsync<AmbaApiError>(async () =>
+                await _client.Auth.RequestEmailOtpAsync("alice@example.com"));
+            Assert.That(ex.Code, Is.EqualTo("RATE_LIMITED"));
+        }
+
+        [Test]
+        public async System.Threading.Tasks.Task Auth_VerifyEmailOtp_DispatchesAndNotifies()
+        {
+            _fake.Enqueue("auth_verify_email_otp", "{\"session_token\":\"s\",\"user\":{\"id\":\"u_1\"}}");
+            Session captured = null;
+            using var sub = _client.Auth.OnAuthStateChange(s => captured = s);
+
+            var result = await _client.Auth.VerifyEmailOtpAsync("alice@example.com", "123456");
+
+            var call = _fake.Calls[0];
+            Assert.That(call.Args[0], Is.EqualTo("alice@example.com"));
+            Assert.That(call.Args[1], Is.EqualTo("123456"));
+            Assert.That((string)result["session_token"], Is.EqualTo("s"));
+            // OnAuthStateChange must fire on a successful OTP verify.
+            Assert.That(captured, Is.Not.Null);
+            Assert.That((string)captured.User["id"], Is.EqualTo("u_1"));
+        }
+
+        [Test]
+        public async System.Threading.Tasks.Task Auth_RequestSmsOtp_DispatchesPhone()
+        {
+            _fake.Enqueue("auth_request_sms_otp", null);
+
+            await _client.Auth.RequestSmsOtpAsync("+15551234567");
+
+            Assert.That(_fake.Calls[0].Name, Is.EqualTo("auth_request_sms_otp"));
+            Assert.That(_fake.Calls[0].Args[0], Is.EqualTo("+15551234567"));
+        }
+
+        [Test]
+        public async System.Threading.Tasks.Task Auth_VerifySmsOtp_DispatchesAndNotifies()
+        {
+            _fake.Enqueue("auth_verify_sms_otp", "{\"session_token\":\"s\",\"user\":{\"id\":\"u_p\"}}");
+            Session captured = null;
+            using var sub = _client.Auth.OnAuthStateChange(s => captured = s);
+
+            var result = await _client.Auth.VerifySmsOtpAsync("+15551234567", "987654");
+
+            Assert.That(_fake.Calls[0].Args[0], Is.EqualTo("+15551234567"));
+            Assert.That(_fake.Calls[0].Args[1], Is.EqualTo("987654"));
+            Assert.That((string)result["session_token"], Is.EqualTo("s"));
+            Assert.That(captured, Is.Not.Null);
+            Assert.That((string)captured.User["id"], Is.EqualTo("u_p"));
+        }
+
+        // ── auth: magic link + linkAccount (NEW in 4.0) ──────────────
+
+        [Test]
+        public async System.Threading.Tasks.Task Auth_RequestMagicLink_DispatchesEmail()
+        {
+            _fake.Enqueue("auth_request_magic_link", null);
+
+            await _client.Auth.RequestMagicLinkAsync("alice@example.com");
+
+            Assert.That(_fake.Calls[0].Name, Is.EqualTo("auth_request_magic_link"));
+            Assert.That(_fake.Calls[0].Args[0], Is.EqualTo("alice@example.com"));
+        }
+
+        [Test]
+        public void Auth_RequestMagicLink_ThrowsOnErrorPayload()
+        {
+            _fake.Enqueue("auth_request_magic_link", "{\"error\":\"Validation error: bad email\"}");
+
+            var ex = Assert.ThrowsAsync<AmbaApiError>(async () =>
+                await _client.Auth.RequestMagicLinkAsync("not-an-email"));
+            Assert.That(ex.Code, Is.EqualTo("VALIDATION_ERROR"));
+        }
+
+        [Test]
+        public async System.Threading.Tasks.Task Auth_VerifyMagicLink_DispatchesAndNotifies()
+        {
+            _fake.Enqueue("auth_verify_magic_link", "{\"session_token\":\"s\",\"user\":{\"id\":\"u_m\"}}");
+            Session captured = null;
+            using var sub = _client.Auth.OnAuthStateChange(s => captured = s);
+
+            var result = await _client.Auth.VerifyMagicLinkAsync("magic-token-abc");
+
+            Assert.That(_fake.Calls[0].Args[0], Is.EqualTo("magic-token-abc"));
+            Assert.That((string)result["session_token"], Is.EqualTo("s"));
+            Assert.That(captured, Is.Not.Null);
+            Assert.That((string)captured.User["id"], Is.EqualTo("u_m"));
+        }
+
+        [Test]
+        public async System.Threading.Tasks.Task Auth_LinkAccount_DispatchesProviderAndCredential()
+        {
+            _fake.Enqueue("auth_link_account", "{\"session_token\":\"s\",\"user\":{\"id\":\"u_link\"}}");
+            Session captured = null;
+            using var sub = _client.Auth.OnAuthStateChange(s => captured = s);
+
+            var result = await _client.Auth.LinkAccountAsync("apple", "apple-id-token-xyz");
+
+            var call = _fake.Calls[0];
+            Assert.That(call.Name, Is.EqualTo("auth_link_account"));
+            Assert.That(call.Args[0], Is.EqualTo("apple"));
+            Assert.That(call.Args[1], Is.EqualTo("apple-id-token-xyz"));
+            Assert.That((string)result["user"]["id"], Is.EqualTo("u_link"));
+            Assert.That(captured, Is.Not.Null);
+        }
+
+        // ── users (NEW in 4.0) ────────────────────────────────────────
+
+        [Test]
+        public async System.Threading.Tasks.Task Users_Get_PassesNullUserIdForCurrent()
+        {
+            _fake.Enqueue("users_get", "{\"id\":\"u_current\"}");
+
+            var result = await _client.Users.GetAsync();
+
+            Assert.That(_fake.Calls[0].Args[0], Is.Null, "null user_id → current user");
+            Assert.That((string)result["id"], Is.EqualTo("u_current"));
+        }
+
+        [Test]
+        public async System.Threading.Tasks.Task Users_Get_ForwardsExplicitUserId()
+        {
+            _fake.Enqueue("users_get", "{\"id\":\"u_42\"}");
+
+            await _client.Users.GetAsync("u_42");
+
+            Assert.That(_fake.Calls[0].Args[0], Is.EqualTo("u_42"));
+        }
+
+        [Test]
+        public async System.Threading.Tasks.Task Users_Update_SendsNullUserIdAndJsonPatch()
+        {
+            _fake.Enqueue("users_update", "{\"id\":\"u_current\",\"display_name\":\"Bob\"}");
+
+            var result = await _client.Users.UpdateAsync(new Dictionary<string, object>
+            {
+                ["display_name"] = "Bob",
+                ["avatar_url"] = "https://x/y.png",
+            });
+
+            var call = _fake.Calls[0];
+            Assert.That(call.Args[0], Is.Null);
+            var root = JToken.Parse(call.Args[1]);
+            Assert.That((string)root["display_name"], Is.EqualTo("Bob"));
+            Assert.That((string)root["avatar_url"], Is.EqualTo("https://x/y.png"));
+            Assert.That((string)result["display_name"], Is.EqualTo("Bob"));
+        }
+
+        [Test]
+        public void Users_Update_RejectsNullPatch()
+        {
+            Assert.ThrowsAsync<ArgumentNullException>(async () =>
+                await _client.Users.UpdateAsync(null));
+        }
+
+        // ── sessions (NEW in 4.0) ─────────────────────────────────────
+
+        [Test]
+        public async System.Threading.Tasks.Task Sessions_List_DispatchesAndReturnsArray()
+        {
+            _fake.Enqueue("sessions_list", "{\"data\":[{\"id\":\"sess_1\"},{\"id\":\"sess_2\"}]}");
+
+            var result = await _client.Sessions.ListAsync();
+
+            Assert.That(_fake.Calls[0].Name, Is.EqualTo("sessions_list"));
+            Assert.That(_fake.Calls[0].Args, Is.Empty);
+            Assert.That(((JArray)result["data"]).Count, Is.EqualTo(2));
+        }
+
+        [Test]
+        public async System.Threading.Tasks.Task Sessions_Revoke_ForwardsSessionId()
+        {
+            _fake.Enqueue("sessions_revoke", null);
+
+            await _client.Sessions.RevokeAsync("sess_xyz");
+
+            Assert.That(_fake.Calls[0].Name, Is.EqualTo("sessions_revoke"));
+            Assert.That(_fake.Calls[0].Args[0], Is.EqualTo("sess_xyz"));
+        }
+
+        [Test]
+        public void Sessions_Revoke_ThrowsOnErrorPayload()
+        {
+            _fake.Enqueue("sessions_revoke", "{\"error\":\"Not found: session\"}");
+
+            var ex = Assert.ThrowsAsync<AmbaApiError>(async () =>
+                await _client.Sessions.RevokeAsync("sess_gone"));
+            Assert.That(ex.Code, Is.EqualTo("NOT_FOUND"));
+        }
+
+        // ── sync (NEW in 4.0) ─────────────────────────────────────────
+
+        [Test]
+        public async System.Threading.Tasks.Task Sync_PushChanges_SerializesArray()
+        {
+            _fake.Enqueue("sync_push_changes", "{\"applied\":2,\"conflicts\":0}");
+
+            var changes = new List<Dictionary<string, object>>
+            {
+                new() { ["op"] = "insert", ["collection"] = "posts", ["id"] = "p_1" },
+                new() { ["op"] = "update", ["collection"] = "posts", ["id"] = "p_2" },
+            };
+            var result = await _client.Sync.PushChangesAsync(changes);
+
+            var call = _fake.Calls[0];
+            var arr = JArray.Parse(call.Args[0]);
+            Assert.That(arr.Count, Is.EqualTo(2));
+            Assert.That((string)arr[0]["op"], Is.EqualTo("insert"));
+            Assert.That((int)result["applied"], Is.EqualTo(2));
+        }
+
+        [Test]
+        public void Sync_PushChanges_RejectsNull()
+        {
+            Assert.ThrowsAsync<ArgumentNullException>(async () =>
+                await _client.Sync.PushChangesAsync(null));
+        }
+
+        [Test]
+        public async System.Threading.Tasks.Task Sync_PullChanges_OmitsCheckpointWhenNull()
+        {
+            _fake.Enqueue("sync_pull_changes", "{\"changes\":[],\"checkpoint_token\":\"ck_1\"}");
+
+            await _client.Sync.PullChangesAsync("collections.posts");
+
+            var root = JToken.Parse(_fake.Calls[0].Args[0]);
+            Assert.That((string)root["entity_type"], Is.EqualTo("collections.posts"));
+            Assert.That(root["checkpoint_token"], Is.Null);
+        }
+
+        [Test]
+        public async System.Threading.Tasks.Task Sync_PullChanges_ForwardsCheckpoint()
+        {
+            _fake.Enqueue("sync_pull_changes", "{\"changes\":[],\"checkpoint_token\":\"ck_2\"}");
+
+            await _client.Sync.PullChangesAsync("collections.posts", checkpointToken: "ck_1");
+
+            var root = JToken.Parse(_fake.Calls[0].Args[0]);
+            Assert.That((string)root["checkpoint_token"], Is.EqualTo("ck_1"));
+        }
+
+        [Test]
+        public void Sync_PullChanges_RejectsEmptyEntityType()
+        {
+            Assert.ThrowsAsync<ArgumentException>(async () =>
+                await _client.Sync.PullChangesAsync(""));
+        }
+
+        // ── leagues (NEW in 4.0) ──────────────────────────────────────
+
+        [Test]
+        public async System.Threading.Tasks.Task Leagues_Me_DispatchesAndReturnsMembership()
+        {
+            _fake.Enqueue("leagues_me", "{\"tier\":\"gold\",\"position\":3}");
+
+            var result = await _client.Leagues.MeAsync();
+
+            Assert.That(_fake.Calls[0].Name, Is.EqualTo("leagues_me"));
+            Assert.That((string)result["tier"], Is.EqualTo("gold"));
+        }
+
+        [Test]
+        public async System.Threading.Tasks.Task Leagues_Cohort_DispatchesAndReturnsCohort()
+        {
+            _fake.Enqueue("leagues_cohort", "{\"members\":[{\"id\":\"u_1\"},{\"id\":\"u_2\"}]}");
+
+            var result = await _client.Leagues.CohortAsync();
+
+            Assert.That(_fake.Calls[0].Name, Is.EqualTo("leagues_cohort"));
+            Assert.That(((JArray)result["members"]).Count, Is.EqualTo(2));
+        }
+
+        // ── lifecycle: Amba.ResetAsync / AmbaClient.ResetAsync ────────
+
+        [Test]
+        public async System.Threading.Tasks.Task Reset_OnClient_DispatchesAmbaReset()
+        {
+            _fake.Enqueue("reset", null);
+
+            await _client.ResetAsync();
+
+            Assert.That(_fake.Calls[0].Name, Is.EqualTo("reset"));
+            Assert.That(_fake.Calls[0].Args, Is.Empty);
+        }
+
+        [Test]
+        public void Reset_ThrowsOnErrorPayload()
+        {
+            _fake.Enqueue("reset", "{\"error\":\"amba_reset: identity clear failed (core dropped anyway): persistence error\"}");
+
+            // The Rust core only returns a payload when something went wrong;
+            // a successful reset returns null.
+            var ex = Assert.ThrowsAsync<AmbaApiError>(async () =>
+                await _client.ResetAsync());
+            Assert.That(ex.Message, Does.Contain("amba_reset"));
+        }
+
+        [Test]
+        public void Reset_StaticFacade_ThrowsWhenNotConfigured()
+        {
+            // Symmetric with the rest of Amba.*: ResetAsync requires
+            // ConfigureAsync first.
+            Assert.ThrowsAsync<InvalidOperationException>(async () =>
+                await Amba.ResetAsync());
+        }
+
+        [Test]
+        public async System.Threading.Tasks.Task Reset_NotifiesAuthSubscribersWithNull()
+        {
+            // Cycle-3 BugBot finding: ResetAsync is documented as a
+            // sign-out / multi-tenant-swap path, so OnAuthStateChange
+            // subscribers must observe the session-cleared transition the
+            // same way they do for SignOutAsync. Otherwise UI keeps
+            // rendering the previous signed-in user.
+            _fake.Enqueue("reset", null);
+            Session captured = new Session(); // sentinel so we can detect explicit null
+            int callCount = 0;
+            using var sub = _client.Auth.OnAuthStateChange(s => { captured = s; callCount++; });
+
+            await _client.ResetAsync();
+
+            Assert.That(callCount, Is.EqualTo(1));
+            Assert.That(captured, Is.Null, "Reset should publish null to indicate the session ended.");
+        }
+
+        [Test]
+        public void Reset_DoesNotNotifyAuthSubscribersOnError()
+        {
+            // The notification fires on success only — a failing reset
+            // leaves the native session state ambiguous, so we don't
+            // signal "session ended" until amba_reset actually clears it.
+            _fake.Enqueue("reset", "{\"error\":\"amba_reset: persistence error\"}");
+            int callCount = 0;
+            using var sub = _client.Auth.OnAuthStateChange(_ => callCount++);
+
+            Assert.ThrowsAsync<AmbaApiError>(async () => await _client.ResetAsync());
+
+            Assert.That(callCount, Is.EqualTo(0),
+                "OnAuthStateChange must not fire when the native reset call fails.");
+        }
+
         // ── collections ──────────────────────────────────────────────
 
         [Test]
@@ -388,6 +747,250 @@ namespace Layers.Amba.Tests
             Assert.That(ex.Message, Is.EqualTo("forbidden"));
         }
 
+        // ── collections: 4.0 — findNearest + count ───────────────────
+
+        [Test]
+        public async System.Threading.Tasks.Task Collections_FindNearest_SerializesOptions()
+        {
+            _fake.Enqueue("collections_find_nearest", "{\"data\":[{\"id\":\"row_1\"}]}");
+
+            var vector = new[] { 0.1f, 0.2f, 0.3f };
+            var result = await _client.Collections.FindNearestAsync(
+                "posts", vector, k: 5,
+                filter: new Dictionary<string, object> { ["author_id"] = "u_1" },
+                vectorField: "embedding");
+
+            var call = _fake.Calls[0];
+            Assert.That(call.Args[0], Is.EqualTo("posts"));
+            var root = JToken.Parse(call.Args[1]);
+            Assert.That((string)root["vector_field"], Is.EqualTo("embedding"));
+            Assert.That(((JArray)root["query_vector"]).Count, Is.EqualTo(3));
+            Assert.That((int)root["k"], Is.EqualTo(5));
+            // Shorthand `{ author_id: "u_1" }` is normalized to a single
+            // Condition node so the Rust core's Filter deserializer accepts it.
+            Assert.That((string)root["filter"]["column"], Is.EqualTo("author_id"));
+            Assert.That((string)root["filter"]["op"], Is.EqualTo("eq"));
+            Assert.That((string)root["filter"]["value"], Is.EqualTo("u_1"));
+            Assert.That(((JArray)result["data"]).Count, Is.EqualTo(1));
+        }
+
+        [Test]
+        public async System.Threading.Tasks.Task Collections_FindNearest_PassesThroughFilterTree()
+        {
+            _fake.Enqueue("collections_find_nearest", "{\"data\":[]}");
+
+            var vector = new[] { 0.1f };
+            await _client.Collections.FindNearestAsync(
+                "posts", vector, k: 1,
+                filter: new Dictionary<string, object>
+                {
+                    ["and"] = new List<Dictionary<string, object>>
+                    {
+                        new Dictionary<string, object> { ["column"] = "a", ["op"] = "eq", ["value"] = 1 },
+                        new Dictionary<string, object> { ["column"] = "b", ["op"] = "gt", ["value"] = 2 },
+                    },
+                });
+
+            var root = JToken.Parse(_fake.Calls[0].Args[1]);
+            // Already a Filter tree — pass through untouched.
+            Assert.That(((JArray)root["filter"]["and"]).Count, Is.EqualTo(2));
+        }
+
+        [Test]
+        public void Collections_FindNearest_RejectsNullVector()
+        {
+            Assert.ThrowsAsync<ArgumentNullException>(async () =>
+                await _client.Collections.FindNearestAsync("posts", null, k: 1));
+        }
+
+        [Test]
+        public async System.Threading.Tasks.Task Collections_Count_PassesNullFilterWhenOmitted()
+        {
+            _fake.Enqueue("collections_count", "{\"data\":{\"count\":42}}");
+
+            var result = await _client.Collections.CountAsync("posts");
+
+            Assert.That(_fake.Calls[0].Args[0], Is.EqualTo("posts"));
+            Assert.That(_fake.Calls[0].Args[1], Is.Null);
+            Assert.That((int)result["data"]["count"], Is.EqualTo(42));
+        }
+
+        [Test]
+        public async System.Threading.Tasks.Task Collections_Count_ForwardsFilter()
+        {
+            _fake.Enqueue("collections_count", "{\"data\":{\"count\":7}}");
+
+            await _client.Collections.CountAsync(
+                "posts",
+                new Dictionary<string, object> { ["author_id"] = "u_1" });
+
+            var root = JToken.Parse(_fake.Calls[0].Args[1]);
+            // Shorthand `{ author_id: "u_1" }` is normalized to a single
+            // Condition node — the Rust core's `Filter::Condition` shape.
+            Assert.That((string)root["column"], Is.EqualTo("author_id"));
+            Assert.That((string)root["op"], Is.EqualTo("eq"));
+            Assert.That((string)root["value"], Is.EqualTo("u_1"));
+        }
+
+        [Test]
+        public async System.Threading.Tasks.Task Collections_Count_FoldsMultiKeyShorthandIntoAnd()
+        {
+            _fake.Enqueue("collections_count", "{\"data\":{\"count\":3}}");
+
+            await _client.Collections.CountAsync(
+                "posts",
+                new Dictionary<string, object>
+                {
+                    ["author_id"] = "u_1",
+                    ["status"] = "published",
+                });
+
+            var root = JToken.Parse(_fake.Calls[0].Args[1]);
+            var and = (JArray)root["and"];
+            Assert.That(and.Count, Is.EqualTo(2));
+            // Iteration order on Dictionary<,> is insertion order on modern CLRs.
+            Assert.That((string)and[0]["column"], Is.EqualTo("author_id"));
+            Assert.That((string)and[0]["op"], Is.EqualTo("eq"));
+            Assert.That((string)and[1]["column"], Is.EqualTo("status"));
+            Assert.That((string)and[1]["op"], Is.EqualTo("eq"));
+        }
+
+        [Test]
+        public async System.Threading.Tasks.Task Collections_Count_PassesThroughFilterTree()
+        {
+            _fake.Enqueue("collections_count", "{\"data\":{\"count\":1}}");
+
+            await _client.Collections.CountAsync(
+                "posts",
+                new Dictionary<string, object>
+                {
+                    ["column"] = "votes",
+                    ["op"] = "gt",
+                    ["value"] = 10,
+                });
+
+            var root = JToken.Parse(_fake.Calls[0].Args[1]);
+            Assert.That((string)root["column"], Is.EqualTo("votes"));
+            Assert.That((string)root["op"], Is.EqualTo("gt"));
+            Assert.That((int)root["value"], Is.EqualTo(10));
+        }
+
+        [Test]
+        public async System.Threading.Tasks.Task Collections_Count_PassesThroughNotTree()
+        {
+            _fake.Enqueue("collections_count", "{\"data\":{\"count\":0}}");
+
+            await _client.Collections.CountAsync(
+                "posts",
+                new Dictionary<string, object>
+                {
+                    ["not"] = new Dictionary<string, object>
+                    {
+                        ["column"] = "deleted", ["op"] = "eq", ["value"] = true,
+                    },
+                });
+
+            var root = JToken.Parse(_fake.Calls[0].Args[1]);
+            Assert.That((string)root["not"]["column"], Is.EqualTo("deleted"));
+        }
+
+        [Test]
+        public async System.Threading.Tasks.Task Collections_Count_TreatsEmptyDictAsNoFilter()
+        {
+            _fake.Enqueue("collections_count", "{\"data\":{\"count\":99}}");
+
+            await _client.Collections.CountAsync(
+                "posts", new Dictionary<string, object>());
+
+            Assert.That(_fake.Calls[0].Args[1], Is.Null);
+        }
+
+        [Test]
+        public void Collections_Count_RejectsConditionWithExtraKeys()
+        {
+            // Cycle-2 BugBot finding: Rust `Filter::Condition` deserializer
+            // is `#[serde(untagged)]` so unknown fields silently drop. A
+            // dict like `{column, op, value, author_id}` would ship to FFI
+            // with `author_id` quietly dropped and the customer would see
+            // wrong counts with no error. Surface it at the call site.
+            Assert.ThrowsAsync<ArgumentException>(async () =>
+                await _client.Collections.CountAsync(
+                    "posts",
+                    new Dictionary<string, object>
+                    {
+                        ["column"] = "votes",
+                        ["op"] = "gt",
+                        ["value"] = 10,
+                        ["author_id"] = "u_1",
+                    }));
+        }
+
+        [Test]
+        public void Collections_Count_RejectsStructuralMixedWithExtraKeys()
+        {
+            // Same untagged-deserializer trap: `{and:[…], author_id:"u_1"}`
+            // would silently drop one half. Reject at the wrapper.
+            Assert.ThrowsAsync<ArgumentException>(async () =>
+                await _client.Collections.CountAsync(
+                    "posts",
+                    new Dictionary<string, object>
+                    {
+                        ["and"] = new List<object>(),
+                        ["author_id"] = "u_1",
+                    }));
+        }
+
+        [Test]
+        public void Collections_Count_RejectsColumnWithoutOp()
+        {
+            // Cycle-3 BugBot finding: `{column:"votes", author_id:"u_1"}`
+            // (column present, op missing) used to fall through to the
+            // shorthand path and ship spurious
+            // `{column:"column", op:"eq", value:"votes"}` +
+            // `{column:"author_id", op:"eq", value:"u_1"}` conditions to the
+            // FFI — wrong rows, no error. Reject so the customer hears at
+            // the call site rather than after-the-fact wrong counts.
+            Assert.ThrowsAsync<ArgumentException>(async () =>
+                await _client.Collections.CountAsync(
+                    "posts",
+                    new Dictionary<string, object>
+                    {
+                        ["column"] = "votes",
+                        ["author_id"] = "u_1",
+                    }));
+        }
+
+        [Test]
+        public void Collections_Count_RejectsOpWithoutColumn()
+        {
+            // Symmetric guard — `{op:"eq", value:5}` is also a half-shaped
+            // Condition that would silently shorthand-fold.
+            Assert.ThrowsAsync<ArgumentException>(async () =>
+                await _client.Collections.CountAsync(
+                    "posts",
+                    new Dictionary<string, object>
+                    {
+                        ["op"] = "eq",
+                        ["value"] = 5,
+                    }));
+        }
+
+        [Test]
+        public void Collections_Count_RejectsColumnOnlyShorthand()
+        {
+            // Just `{column:"votes"}` — no `op`, no other keys. Looks like a
+            // Condition the customer forgot to finish; the shorthand path
+            // would have shipped `{column:"column", op:"eq", value:"votes"}`
+            // (treating the literal key name as a column).
+            Assert.ThrowsAsync<ArgumentException>(async () =>
+                await _client.Collections.CountAsync(
+                    "posts",
+                    new Dictionary<string, object>
+                    {
+                        ["column"] = "votes",
+                    }));
+        }
+
         // ── storage ──────────────────────────────────────────────────
 
         [Test]
@@ -433,6 +1036,90 @@ namespace Layers.Amba.Tests
 
             Assert.That(_fake.Calls[0].Args[0], Is.EqualTo("upload_xyz"));
             Assert.That(_fake.Calls[0].Args[1], Is.EqualTo("asset_1"));
+        }
+
+        // ── storage: 4.0 — list / delete / download ─────────────────
+
+        [Test]
+        public async System.Threading.Tasks.Task Storage_List_PassesNullPrefixWhenOmitted()
+        {
+            _fake.Enqueue("storage_list", "{\"data\":[]}");
+
+            await _client.Storage.ListAsync();
+
+            Assert.That(_fake.Calls[0].Args[0], Is.Null);
+        }
+
+        [Test]
+        public async System.Threading.Tasks.Task Storage_List_ForwardsPrefix()
+        {
+            _fake.Enqueue("storage_list", "{\"data\":[{\"id\":\"a_1\"}]}");
+
+            var result = await _client.Storage.ListAsync("avatars/");
+
+            Assert.That(_fake.Calls[0].Args[0], Is.EqualTo("avatars/"));
+            Assert.That(((JArray)result["data"]).Count, Is.EqualTo(1));
+        }
+
+        [Test]
+        public async System.Threading.Tasks.Task Storage_Delete_ForwardsAssetId()
+        {
+            _fake.Enqueue("storage_delete", null);
+
+            await _client.Storage.DeleteAsync("asset_xyz");
+
+            Assert.That(_fake.Calls[0].Name, Is.EqualTo("storage_delete"));
+            Assert.That(_fake.Calls[0].Args[0], Is.EqualTo("asset_xyz"));
+        }
+
+        [Test]
+        public async System.Threading.Tasks.Task Storage_Download_DecodesBase64Envelope()
+        {
+            // Wire shape is `{"data":"<base64>"}` per Phase A FFI. "Zm9vYmFy" = "foobar".
+            _fake.Enqueue("storage_download", "{\"data\":\"Zm9vYmFy\"}");
+
+            var bytes = await _client.Storage.DownloadAsync("asset_xyz");
+
+            Assert.That(_fake.Calls[0].Name, Is.EqualTo("storage_download"));
+            Assert.That(_fake.Calls[0].Args[0], Is.EqualTo("asset_xyz"));
+            Assert.That(Encoding.UTF8.GetString(bytes), Is.EqualTo("foobar"));
+        }
+
+        [Test]
+        public void Storage_Download_ThrowsOnMalformedEnvelope()
+        {
+            _fake.Enqueue("storage_download", "{\"unexpected\":\"shape\"}");
+
+            var ex = Assert.ThrowsAsync<AmbaApiError>(async () =>
+                await _client.Storage.DownloadAsync("asset_xyz"));
+            Assert.That(ex.Code, Is.EqualTo("UNKNOWN_ERROR"));
+            Assert.That(ex.Message, Does.Contain("missing data"));
+        }
+
+        [Test]
+        public void Storage_Download_ThrowsAmbaApiErrorOnInvalidBase64()
+        {
+            // Cycle-3 BugBot finding: a corrupt `data` field used to raise
+            // raw FormatException, breaking the storage namespace's uniform
+            // failure surface (every other storage method routes through
+            // JsonUtil → AmbaApiError). Verify the wrapper now surfaces
+            // it as AmbaApiError with a useful message.
+            _fake.Enqueue("storage_download", "{\"data\":\"not%%%valid%%%base64\"}");
+
+            var ex = Assert.ThrowsAsync<AmbaApiError>(async () =>
+                await _client.Storage.DownloadAsync("asset_xyz"));
+            Assert.That(ex.Code, Is.EqualTo("UNKNOWN_ERROR"));
+            Assert.That(ex.Message, Does.Contain("not valid base64"));
+        }
+
+        [Test]
+        public void Storage_Download_ThrowsOnErrorPayload()
+        {
+            _fake.Enqueue("storage_download", "{\"error\":\"Not found: asset\"}");
+
+            var ex = Assert.ThrowsAsync<AmbaApiError>(async () =>
+                await _client.Storage.DownloadAsync("asset_missing"));
+            Assert.That(ex.Code, Is.EqualTo("NOT_FOUND"));
         }
 
         // ── push ─────────────────────────────────────────────────────
@@ -1272,6 +1959,200 @@ namespace Layers.Amba.Tests
                 var _ = Amba.Diagnostics;
             });
         }
+
+        // ── messaging: 4.0 — createConversation / listMessages /
+        //                getMessage (fix) / markRead ──────────────────
+
+        [Test]
+        public async System.Threading.Tasks.Task Messaging_CreateConversation_SerializesParticipantsAndMetadata()
+        {
+            _fake.Enqueue("messaging_create_conversation", "{\"id\":\"conv_1\"}");
+
+            var result = await _client.Messaging.CreateConversationAsync(
+                new[] { "u_1", "u_2" },
+                new Dictionary<string, object> { ["type"] = "direct", ["name"] = "alice-bob" });
+
+            var call = _fake.Calls[0];
+            Assert.That(call.Name, Is.EqualTo("messaging_create_conversation"));
+            var root = JToken.Parse(call.Args[0]);
+            var participants = (JArray)root["participant_ids"];
+            Assert.That(participants.Count, Is.EqualTo(2));
+            Assert.That((string)participants[0], Is.EqualTo("u_1"));
+            Assert.That((string)root["type"], Is.EqualTo("direct"));
+            Assert.That((string)root["name"], Is.EqualTo("alice-bob"));
+            Assert.That((string)result["id"], Is.EqualTo("conv_1"));
+        }
+
+        [Test]
+        public void Messaging_CreateConversation_RejectsNullParticipants()
+        {
+            Assert.ThrowsAsync<ArgumentNullException>(async () =>
+                await _client.Messaging.CreateConversationAsync(null));
+        }
+
+        [Test]
+        public void Messaging_CreateConversation_RejectsParticipantIdsInMetadata()
+        {
+            // Cycle-2 BugBot finding: looping `metadata` into `body`
+            // would let a `metadata["participant_ids"]` key silently
+            // overwrite the typed `participants` argument. The participant
+            // list is owned by the argument; conflict is a programming
+            // error, not a silent overwrite.
+            Assert.ThrowsAsync<ArgumentException>(async () =>
+                await _client.Messaging.CreateConversationAsync(
+                    new[] { "u_1", "u_2" },
+                    new Dictionary<string, object> { ["participant_ids"] = new[] { "u_attacker" } }));
+        }
+
+        [Test]
+        public async System.Threading.Tasks.Task Messaging_ListMessages_SendsSentinelWhenLimitOmitted()
+        {
+            _fake.Enqueue("messaging_list_messages", "{\"data\":[]}");
+
+            await _client.Messaging.ListMessagesAsync("conv_1");
+
+            var call = _fake.Calls[0];
+            Assert.That(call.Args[0], Is.EqualTo("conv_1"));
+            // u32::MAX == "not provided" sentinel per Phase A.
+            Assert.That(call.Args[1], Is.EqualTo(uint.MaxValue.ToString()));
+            Assert.That(call.Args[2], Is.EqualTo(uint.MaxValue.ToString()));
+        }
+
+        [Test]
+        public async System.Threading.Tasks.Task Messaging_ListMessages_ForwardsLimitAndOffset()
+        {
+            _fake.Enqueue("messaging_list_messages", "{\"data\":[{\"id\":\"m_1\"}]}");
+
+            await _client.Messaging.ListMessagesAsync("conv_1", limit: 25, offset: 50);
+
+            var call = _fake.Calls[0];
+            Assert.That(call.Args[1], Is.EqualTo("25"));
+            Assert.That(call.Args[2], Is.EqualTo("50"));
+        }
+
+        [Test]
+        public async System.Threading.Tasks.Task Messaging_GetMessage_PassesConversationIdAndMessageId()
+        {
+            // Phase A fix: the symbol now exists with a 2-arg signature
+            // (conv_id, msg_id). Pre-4.0 the wrapper sent only `id` to
+            // a missing symbol and threw EntryPointNotFoundException.
+            _fake.Enqueue("messaging_get_message", "{\"id\":\"m_1\",\"body\":\"hi\"}");
+
+            var result = await _client.Messaging.GetMessageAsync("conv_1", "m_1");
+
+            var call = _fake.Calls[0];
+            Assert.That(call.Name, Is.EqualTo("messaging_get_message"));
+            Assert.That(call.Args[0], Is.EqualTo("conv_1"));
+            Assert.That(call.Args[1], Is.EqualTo("m_1"));
+            Assert.That((string)result["id"], Is.EqualTo("m_1"));
+        }
+
+        [Test]
+        public async System.Threading.Tasks.Task Messaging_GetMessage_ReturnsNullJTokenWhenNotFound()
+        {
+            // The Rust core returns the literal `null` JSON when the
+            // message isn't in the first 5,000 entries.
+            _fake.Enqueue("messaging_get_message", "null");
+
+            var result = await _client.Messaging.GetMessageAsync("conv_1", "m_missing");
+
+            Assert.That(result.Type, Is.EqualTo(JTokenType.Null));
+        }
+
+        [Test]
+        public async System.Threading.Tasks.Task Messaging_MarkRead_ForwardsConversationId()
+        {
+            _fake.Enqueue("messaging_mark_read", null);
+
+            await _client.Messaging.MarkReadAsync("conv_1");
+
+            Assert.That(_fake.Calls[0].Name, Is.EqualTo("messaging_mark_read"));
+            Assert.That(_fake.Calls[0].Args[0], Is.EqualTo("conv_1"));
+        }
+
+        // ── friends: 4.0 — sendRequest / acceptRequest / declineRequest ──
+
+        [Test]
+        public async System.Threading.Tasks.Task Friends_SendRequest_ReturnsFriendship()
+        {
+            _fake.Enqueue("friends_send_request", "{\"id\":\"f_1\",\"status\":\"pending\"}");
+
+            var result = await _client.Friends.SendRequestAsync("u_target");
+
+            Assert.That(_fake.Calls[0].Args[0], Is.EqualTo("u_target"));
+            Assert.That((string)result["status"], Is.EqualTo("pending"));
+        }
+
+        [Test]
+        public async System.Threading.Tasks.Task Friends_AcceptRequest_ReturnsFriendship()
+        {
+            _fake.Enqueue("friends_accept_request", "{\"id\":\"f_1\",\"status\":\"accepted\"}");
+
+            var result = await _client.Friends.AcceptRequestAsync("f_1");
+
+            Assert.That(_fake.Calls[0].Args[0], Is.EqualTo("f_1"));
+            Assert.That((string)result["status"], Is.EqualTo("accepted"));
+        }
+
+        [Test]
+        public async System.Threading.Tasks.Task Friends_DeclineRequest_ForwardsFriendshipId()
+        {
+            _fake.Enqueue("friends_decline_request", null);
+
+            await _client.Friends.DeclineRequestAsync("f_1");
+
+            Assert.That(_fake.Calls[0].Name, Is.EqualTo("friends_decline_request"));
+            Assert.That(_fake.Calls[0].Args[0], Is.EqualTo("f_1"));
+        }
+
+        // ── catalog: 4.0 — get(id) ───────────────────────────────────
+
+        [Test]
+        public async System.Threading.Tasks.Task Catalog_Get_ForwardsItemIdAndReturnsItem()
+        {
+            _fake.Enqueue("catalog_get", "{\"id\":\"sku_1\",\"name\":\"Coin Pack\"}");
+
+            var result = await _client.Catalog.GetAsync("sku_1");
+
+            Assert.That(_fake.Calls[0].Name, Is.EqualTo("catalog_get"));
+            Assert.That(_fake.Calls[0].Args[0], Is.EqualTo("sku_1"));
+            Assert.That((string)result["name"], Is.EqualTo("Coin Pack"));
+        }
+
+        // ── 4.0: version + namespace wiring ──────────────────────────
+
+        [Test]
+        public void Version_Is40()
+        {
+            // Coordinated 4.0 release across all 9 SDKs — pin the value
+            // so a stray bump that doesn't match the canonical spec
+            // breaks loudly in CI rather than silently shipping.
+            Assert.That(Amba.Version, Is.EqualTo("4.0.0"));
+        }
+
+        [Test]
+        public void NewNamespaces_AreWired()
+        {
+            // Smoke-test the 4 net-new namespaces resolve off both the
+            // client and the static facade pattern (constructed via
+            // AmbaClient here; the static facade test elsewhere covers
+            // the InvalidOperationException path).
+            Assert.That(_client.Users, Is.Not.Null);
+            Assert.That(_client.Sessions, Is.Not.Null);
+            Assert.That(_client.Sync, Is.Not.Null);
+            Assert.That(_client.Leagues, Is.Not.Null);
+        }
+
+        [Test]
+        public void NewNamespaces_AreStableAcrossReads()
+        {
+            // Same singleton contract as the existing namespace
+            // instances (see DI_NamespaceInstances_AreStableAcrossReads).
+            Assert.That(_client.Users, Is.SameAs(_client.Users));
+            Assert.That(_client.Sessions, Is.SameAs(_client.Sessions));
+            Assert.That(_client.Sync, Is.SameAs(_client.Sync));
+            Assert.That(_client.Leagues, Is.SameAs(_client.Leagues));
+        }
     }
 
     // ── Fake INativeMethods ──────────────────────────────────────────
@@ -1347,6 +2228,7 @@ namespace Layers.Amba.Tests
         // ── INativeMethods impls ───────────────────────────────────
 
         public IntPtr amba_init(IntPtr configJson) => Respond("init", FromPtr(configJson));
+        public IntPtr amba_reset() => Respond("reset");
         public IntPtr amba_anonymous_id() => Respond("anonymous_id");
         public IntPtr amba_app_user_id() => Respond("app_user_id");
         public uint amba_is_authenticated() => _isAuthenticated;
@@ -1368,6 +2250,39 @@ namespace Layers.Amba.Tests
         public IntPtr amba_auth_refresh() => Respond("auth_refresh");
         public IntPtr amba_auth_me() => Respond("auth_me");
 
+        public IntPtr amba_auth_request_email_otp(IntPtr email) =>
+            Respond("auth_request_email_otp", FromPtr(email));
+        public IntPtr amba_auth_verify_email_otp(IntPtr email, IntPtr code) =>
+            Respond("auth_verify_email_otp", FromPtr(email), FromPtr(code));
+        public IntPtr amba_auth_request_sms_otp(IntPtr phone) =>
+            Respond("auth_request_sms_otp", FromPtr(phone));
+        public IntPtr amba_auth_verify_sms_otp(IntPtr phone, IntPtr code) =>
+            Respond("auth_verify_sms_otp", FromPtr(phone), FromPtr(code));
+
+        public IntPtr amba_auth_request_magic_link(IntPtr email) =>
+            Respond("auth_request_magic_link", FromPtr(email));
+        public IntPtr amba_auth_verify_magic_link(IntPtr token) =>
+            Respond("auth_verify_magic_link", FromPtr(token));
+        public IntPtr amba_auth_link_account(IntPtr provider, IntPtr credential) =>
+            Respond("auth_link_account", FromPtr(provider), FromPtr(credential));
+
+        // ── users / sessions / sync / leagues (4.0) ──
+        public IntPtr amba_users_get(IntPtr userId) => Respond("users_get", FromPtr(userId));
+        public IntPtr amba_users_update(IntPtr userId, IntPtr patchJson) =>
+            Respond("users_update", FromPtr(userId), FromPtr(patchJson));
+
+        public IntPtr amba_sessions_list() => Respond("sessions_list");
+        public IntPtr amba_sessions_revoke(IntPtr sessionId) =>
+            Respond("sessions_revoke", FromPtr(sessionId));
+
+        public IntPtr amba_sync_push_changes(IntPtr changesJson) =>
+            Respond("sync_push_changes", FromPtr(changesJson));
+        public IntPtr amba_sync_pull_changes(IntPtr sinceJson) =>
+            Respond("sync_pull_changes", FromPtr(sinceJson));
+
+        public IntPtr amba_leagues_me() => Respond("leagues_me");
+        public IntPtr amba_leagues_cohort() => Respond("leagues_cohort");
+
         public IntPtr amba_collections_find(IntPtr collection, IntPtr optionsJson) =>
             Respond("collections_find", FromPtr(collection), FromPtr(optionsJson));
         public IntPtr amba_collections_find_one(IntPtr collection, IntPtr id) =>
@@ -1378,12 +2293,19 @@ namespace Layers.Amba.Tests
             Respond("collections_update", FromPtr(collection), FromPtr(id), FromPtr(setJson));
         public IntPtr amba_collections_delete(IntPtr collection, IntPtr id) =>
             Respond("collections_delete", FromPtr(collection), FromPtr(id));
+        public IntPtr amba_collections_find_nearest(IntPtr collection, IntPtr optionsJson) =>
+            Respond("collections_find_nearest", FromPtr(collection), FromPtr(optionsJson));
+        public IntPtr amba_collections_count(IntPtr collection, IntPtr filterJson) =>
+            Respond("collections_count", FromPtr(collection), FromPtr(filterJson));
 
         public IntPtr amba_storage_presign(IntPtr bucket, IntPtr filename, IntPtr mimeType, ulong sizeBytes, int retentionDays) =>
             Respond("storage_presign", FromPtr(bucket), FromPtr(filename), FromPtr(mimeType),
                 sizeBytes.ToString(), retentionDays.ToString());
         public IntPtr amba_storage_commit(IntPtr uploadId, IntPtr assetId) =>
             Respond("storage_commit", FromPtr(uploadId), FromPtr(assetId));
+        public IntPtr amba_storage_list(IntPtr prefix) => Respond("storage_list", FromPtr(prefix));
+        public IntPtr amba_storage_delete(IntPtr assetId) => Respond("storage_delete", FromPtr(assetId));
+        public IntPtr amba_storage_download(IntPtr assetId) => Respond("storage_download", FromPtr(assetId));
 
         public IntPtr amba_push_register(IntPtr token, IntPtr platform, IntPtr bundleId) =>
             Respond("push_register", FromPtr(token), FromPtr(platform), FromPtr(bundleId));
@@ -1452,6 +2374,9 @@ namespace Layers.Amba.Tests
         public IntPtr amba_friends_block_user(IntPtr userId) => Respond("friends_block_user", FromPtr(userId));
         public IntPtr amba_friends_unblock_user(IntPtr userId) => Respond("friends_unblock_user", FromPtr(userId));
         public IntPtr amba_friends_remove_block(IntPtr friendshipId) => Respond("friends_remove_block", FromPtr(friendshipId));
+        public IntPtr amba_friends_send_request(IntPtr userId) => Respond("friends_send_request", FromPtr(userId));
+        public IntPtr amba_friends_accept_request(IntPtr friendshipId) => Respond("friends_accept_request", FromPtr(friendshipId));
+        public IntPtr amba_friends_decline_request(IntPtr friendshipId) => Respond("friends_decline_request", FromPtr(friendshipId));
 
         public IntPtr amba_groups_create(IntPtr paramsJson) => Respond("groups_create", FromPtr(paramsJson));
         public IntPtr amba_groups_get(IntPtr id) => Respond("groups_get", FromPtr(id));
@@ -1463,7 +2388,14 @@ namespace Layers.Amba.Tests
         public IntPtr amba_groups_invite(IntPtr id, IntPtr userId) => Respond("groups_invite", FromPtr(id), FromPtr(userId));
 
         public IntPtr amba_messaging_get_conversations() => Respond("messaging_get_conversations");
-        public IntPtr amba_messaging_get_message(IntPtr id) => Respond("messaging_get_message", FromPtr(id));
+        public IntPtr amba_messaging_create_conversation(IntPtr requestJson) =>
+            Respond("messaging_create_conversation", FromPtr(requestJson));
+        public IntPtr amba_messaging_list_messages(IntPtr conversationId, uint limit, uint offset) =>
+            Respond("messaging_list_messages", FromPtr(conversationId), limit.ToString(), offset.ToString());
+        public IntPtr amba_messaging_get_message(IntPtr conversationId, IntPtr messageId) =>
+            Respond("messaging_get_message", FromPtr(conversationId), FromPtr(messageId));
+        public IntPtr amba_messaging_mark_read(IntPtr conversationId) =>
+            Respond("messaging_mark_read", FromPtr(conversationId));
         public IntPtr amba_messaging_send_message(IntPtr requestJson) => Respond("messaging_send_message", FromPtr(requestJson));
 
         public IntPtr amba_moderation_report_user(IntPtr requestJson) => Respond("moderation_report_user", FromPtr(requestJson));
@@ -1490,6 +2422,7 @@ namespace Layers.Amba.Tests
 
         // ── lifecycle ──
         public IntPtr amba_catalog_list() => Respond("catalog_list");
+        public IntPtr amba_catalog_get(IntPtr itemId) => Respond("catalog_get", FromPtr(itemId));
 
         public IntPtr amba_content_get_today(IntPtr channel) => Respond("content_get_today", FromPtr(channel));
         public IntPtr amba_content_get_library(IntPtr channel, uint limit, IntPtr cursor) =>

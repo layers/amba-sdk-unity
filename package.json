@@ -1,11 +1,11 @@
 {
   "name": "com.layers.amba",
-  "version": "1.0.1",
+  "version": "4.0.1",
   "displayName": "amba SDK",
   "description": "amba SDK for Unity \u2014 full 25-namespace surface for the agent-native backend-as-a-service.",
   "unity": "2022.3",
   "license": "MIT",
-  "documentationUrl": "https://docs.amba.dev/docs/sdk/unity",
+  "documentationUrl": "https://docs.amba.dev/sdk/unity",
   "changelogUrl": "https://github.com/layers/amba-sdk-unity/blob/main/CHANGELOG.md",
   "licensesUrl": "https://opensource.org/licenses/MIT",
   "dependencies": {},
