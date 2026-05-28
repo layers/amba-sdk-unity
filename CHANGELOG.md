@@ -2,6 +2,20 @@
 
 All notable changes to this package are documented here.
 
+## [4.0.2] — 2026-05-27
+
+Version-alignment release across every published Amba package. Brings
+the infra-tier packages (`@layers/amba`, `@layers/amba-shared`,
+`@layers/amba-mcp` — previously on 1.x) onto the same 4.x track as the
+SDKs so customers can pin a single version everywhere. No surface or
+behavior changes in this SDK.
+
+Removed from the package family in this release: the deprecated
+`@layers/amba-functions` and `@layers/amba-client` packages were
+unpublished from npm. Amba functions are plain ES modules with the
+standard `export default { async fetch(req, env, ctx) }` shape — no
+wrapper. See docs.amba.dev/functions/runtime for the full contract.
+
 ## [4.0.1] — 2026-05-26
 
 Version-alignment release across every Amba SDK. No surface or behavior
