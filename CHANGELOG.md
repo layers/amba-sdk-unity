@@ -2,6 +2,19 @@
 
 All notable changes to this package are documented here.
 
+## [4.0.3] — 2026-06-02
+
+Fixes a packaging bug that made the entire SDK inert when installed from the
+UPM mirror. The published package shipped with **no `.meta` files** — neither
+for the C# sources/asmdefs nor for the native `libamba_core` binaries — so Unity
+dropped every asset on import ("has no meta file, but it's in an immutable
+folder. The asset will be ignored"), and the SDK simply wasn't there.
+
+The release pipeline now generates a `.meta` for every file and folder in the
+package, with deterministic GUIDs (stable across releases) and correct
+per-platform plugin settings for each native binary (Android arm64/armv7, iOS,
+macOS universal, Linux x64, Windows x64). No API or behavior changes.
+
 ## [4.0.2] — 2026-05-27
 
 Version-alignment release across every published Amba package. Brings
