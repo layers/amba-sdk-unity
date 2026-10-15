@@ -263,7 +263,7 @@ namespace Layers.Amba
     /// </summary>
     public static class Amba
     {
-        public const string Version = "4.0.5";
+        public const string Version = "4.0.6";
 
         private static AmbaClient _client;
 
@@ -1190,6 +1190,7 @@ namespace Layers.Amba
         public Task<JToken> ItemAsync(string id) =>
             Task.FromResult(JsonUtil.ExpectJson(NativeUtil.InvokeUnary(_bindings.amba_inventory_get_item, id, _bindings)));
 
+        /// <summary>Buy an item with a virtual currency: <c>{ "sku", "currency_key"?, "quantity"? }</c>. A purchase buys one item, so leave <c>quantity</c> out or send 1; any other value is refused with <c>400 QUANTITY_NOT_SUPPORTED</c> before anything is charged. Returns the purchase receipt.</summary>
         public Task<JToken> PurchaseAsync(Dictionary<string, object> request)
         {
             var json = JsonConvert.SerializeObject(request);

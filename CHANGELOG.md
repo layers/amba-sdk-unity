@@ -2,6 +2,18 @@
 
 All notable changes to this package are documented here.
 
+## [4.0.6] — 2026-10-15
+
+- Ships the 4.0.13 core: each friendship from `Friends.ListAsync` and the other `Friends` calls carries `requester_id` and `addressee_id`, so a pending row reads as incoming (`addressee_id` is `user_id`) or outgoing (`requester_id` is `user_id`).
+
+### Server behavior
+
+These ship with the API, so apps on earlier versions get them without an upgrade.
+
+- `Reviews.CreateAsync` works: `POST /v1/client/reviews` reads the `target_type` / `target_id` the SDK sends (it read only `item_type` / `item_id` and failed with a 500), and `Reviews.CreateAsync` / `Reviews.UpdateAsync` come back with `author_id`, `target_type` and `target_id`. `target_type` is `content_item` or `custom`, and `rating` is a whole number from 1 to 5; other values answer `400 INVALID_ITEM_TYPE` / `400 INVALID_RATING`. The core checks the rating before sending.
+- `Friends.ListAsync()` returns the accepted friendships, then the pending requests in both directions; it returned the accepted ones only. `Friends.FriendsAsync()` still returns the accepted ones. Blocked rows stay out of both, and a list holds at most 1000 rows.
+- `Inventory.PurchaseAsync` with a `quantity` other than `1` answers `400 QUANTITY_NOT_SUPPORTED` and charges nothing. It used to charge for and grant one item whatever the quantity; call it once per item to buy several.
+
 ## [4.0.5] — 2026-10-15
 
 - Ships the 4.0.12 core: `Inventory.PurchaseAsync` resolves with the purchase receipt (`purchased`, `currency_code`, `price`, `balance_after`), and a claim of a code no user owns has a null `referrer_id`.
