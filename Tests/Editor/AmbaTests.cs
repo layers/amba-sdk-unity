@@ -1186,6 +1186,48 @@ namespace Layers.Amba.Tests
             Assert.That(await _client.Entitlements.HasAsync("enterprise"), Is.False);
         }
 
+        [Test]
+        public async System.Threading.Tasks.Task Entitlements_Restore_ReturnsParsedJson()
+        {
+            _fake.Enqueue(
+                "entitlements_restore",
+                "{\"active\":[{\"name\":\"pro\"}],\"restored\":1}");
+
+            var result = await _client.Entitlements.RestoreAsync();
+
+            Assert.That((int)result["restored"], Is.EqualTo(1));
+            Assert.That((string)result["active"][0]["name"], Is.EqualTo("pro"));
+        }
+
+        // ── offerings ────────────────────────────────────────────────
+
+        [Test]
+        public async System.Threading.Tasks.Task Offerings_NoId_PassesNullPointer()
+        {
+            _fake.Enqueue(
+                "offerings",
+                "{\"offerings\":[{\"id\":\"default\",\"packages\":[]}]}");
+
+            var result = await _client.OfferingsAsync();
+
+            Assert.That((string)result["offerings"][0]["id"], Is.EqualTo("default"));
+            // No offering id → the C ABI receives NULL (marshalled as null string).
+            Assert.That(_fake.Calls[_fake.Calls.Count - 1].Args[0], Is.Null);
+        }
+
+        [Test]
+        public async System.Threading.Tasks.Task Offerings_WithId_ForwardsTheId()
+        {
+            _fake.Enqueue(
+                "offerings",
+                "{\"offerings\":[{\"id\":\"summer\",\"packages\":[]}]}");
+
+            var result = await _client.OfferingsAsync("summer");
+
+            Assert.That((string)result["offerings"][0]["id"], Is.EqualTo("summer"));
+            Assert.That(_fake.Calls[_fake.Calls.Count - 1].Args[0], Is.EqualTo("summer"));
+        }
+
         // ── ai ───────────────────────────────────────────────────────
 
         [Test]
@@ -2443,6 +2485,10 @@ namespace Layers.Amba.Tests
 
         // ── diagnostics ──
         public IntPtr amba_diagnostics_ping() => Respond("diagnostics_ping");
+
+        // ── offerings + restore (codegen'd interface members) ──
+        public IntPtr amba_offerings(IntPtr offeringId) => Respond("offerings", FromPtr(offeringId));
+        public IntPtr amba_entitlements_restore() => Respond("entitlements_restore");
     }
 
     public readonly struct Call

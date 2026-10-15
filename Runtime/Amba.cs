@@ -239,6 +239,12 @@ namespace Layers.Amba
             Auth.NotifyAuthSubscribersForReset();
             return Task.CompletedTask;
         }
+
+        // <generated:offerings>
+        /// <summary>Subscription offerings — the packages your paywall renders, provider-neutral. Pass an `offeringId` for one offering; omit it for all.</summary>
+        public Task<JToken> OfferingsAsync(string offeringId = null) =>
+            Task.FromResult(JsonUtil.ExpectJson(NativeUtil.InvokeUnary(Bindings.amba_offerings, offeringId, Bindings)));
+        // </generated:offerings>
     }
 
     // ═══════════════════════════════════════════════════════════════
@@ -257,7 +263,7 @@ namespace Layers.Amba
     /// </summary>
     public static class Amba
     {
-        public const string Version = "4.0.3";
+        public const string Version = "4.0.5";
 
         private static AmbaClient _client;
 
@@ -303,6 +309,11 @@ namespace Layers.Amba
         public static StorageNamespace Storage => RequireClient().Storage;
         public static PushNamespace Push => RequireClient().Push;
         public static EntitlementsNamespace Entitlements => RequireClient().Entitlements;
+
+        // <generated:offerings.static>
+        /// <summary>Subscription offerings — the packages your paywall renders, provider-neutral. Pass an `offeringId` for one offering; omit it for all.</summary>
+        public static Task<JToken> OfferingsAsync(string offeringId = null) => RequireClient().OfferingsAsync(offeringId);
+        // </generated:offerings.static>
         public static AiNamespace Ai => RequireClient().Ai;
         public static ConfigNamespace Config => RequireClient().Config;
         public static FlagsNamespace Flags => RequireClient().Flags;
@@ -1060,6 +1071,12 @@ namespace Layers.Amba
             try { return Task.FromResult(_bindings.amba_entitlements_has(p) != 0); }
             finally { Marshal.FreeHGlobal(p); }
         }
+
+        // <generated:entitlements.restore>
+        /// <summary>Restore purchases — re-sync the user's owned entitlements from the server and return the active set. Required for App Store review (3.1.1); wire it to a "Restore Purchases" button. Rejects (access unchanged) if the server can't reach the validation engine — show a retry message.</summary>
+        public Task<JToken> RestoreAsync() =>
+            Task.FromResult(JsonUtil.ExpectJson(NativeUtil.CallReturnString(_bindings.amba_entitlements_restore, _bindings)));
+        // </generated:entitlements.restore>
     }
 
     public class AiNamespace
@@ -2214,6 +2231,12 @@ namespace Layers.Amba
 
         // ── diagnostics ──
         IntPtr amba_diagnostics_ping();
+
+        // ── codegen (see sdks/codegen/emit/csharp.ts) ──
+        // <generated:unity.bindings.interface>
+        IntPtr amba_offerings(IntPtr offeringId);
+        IntPtr amba_entitlements_restore();
+        // </generated:unity.bindings.interface>
     }
 
     /// <summary>
@@ -2424,6 +2447,12 @@ namespace Layers.Amba
 
         // ── diagnostics ──
         public IntPtr amba_diagnostics_ping() => NativeMethods.amba_diagnostics_ping();
+
+        // ── codegen (see sdks/codegen/emit/csharp.ts) ──
+        // <generated:unity.bindings.delegation>
+        public IntPtr amba_offerings(IntPtr offeringId) => NativeMethods.amba_offerings(offeringId);
+        public IntPtr amba_entitlements_restore() => NativeMethods.amba_entitlements_restore();
+        // </generated:unity.bindings.delegation>
     }
 
     // ═══════════════════════════════════════════════════════════════
@@ -2772,5 +2801,11 @@ namespace Layers.Amba
 
         // ── diagnostics ──
         [DllImport(LIB)] public static extern IntPtr amba_diagnostics_ping();
+
+        // ── codegen (see sdks/codegen/emit/csharp.ts) ──
+        // <generated:unity.bindings.dllimport>
+        [DllImport(LIB)] public static extern IntPtr amba_offerings(IntPtr offeringId);
+        [DllImport(LIB)] public static extern IntPtr amba_entitlements_restore();
+        // </generated:unity.bindings.dllimport>
     }
 }
