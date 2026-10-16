@@ -2,6 +2,21 @@
 
 All notable changes to this package are documented here.
 
+## [4.0.7] — 2026-10-15
+
+- Ships the 4.0.14 core: `Inventory.PurchaseAsync` passes a `"store_id"` entry on, so it buys through that store's listing, with its override price, per-user limit and segment. An item an active store limits per user is sold only this way; without `store_id` the purchase answers `409 STORE_PURCHASE_REQUIRED`. The core used to drop `store_id`.
+
+### Server behavior
+
+These ship with the API, so apps on earlier versions get them without an upgrade.
+
+- A store's segment is enforced: a store with a `segment_id` is listed, read and sold only to users the segment's last evaluation recorded as members (a user it has not evaluated yet sees it after the next evaluation), and answers `404 NOT_FOUND` to everyone else. An item only segment-targeted stores list is sold from the catalog to their members only (`403 STORE_ACCESS_REQUIRED`).
+- A store purchase charges the listing's override price, the `price_cents` that `stores.getPurchaseOptions` now shows.
+
+### Packaging
+
+- The iOS plugin `Runtime/Plugins/iOS/libamba_core.a` targets iOS 12.0, the oldest iOS Unity 2022.3 supports, and the docs state iOS 12 as the SDK's minimum. Its TLS library's C objects targeted the iOS version of the build machine's SDK (iOS 17.5 on the release runner), so Xcode printed "object file ... was built for newer iOS version" for each of them when an app's minimum iOS was lower. Those warnings are gone.
+
 ## [4.0.6] — 2026-10-15
 
 - Ships the 4.0.13 core: each friendship from `Friends.ListAsync` and the other `Friends` calls carries `requester_id` and `addressee_id`, so a pending row reads as incoming (`addressee_id` is `user_id`) or outgoing (`requester_id` is `user_id`).

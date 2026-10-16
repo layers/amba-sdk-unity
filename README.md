@@ -2,7 +2,7 @@
 
 Amba is the agent-native backend-as-a-service for mobile and web apps. This package is the Unity SDK (`com.layers.amba`), distributed via Unity Package Manager.
 
-Supported build targets: iOS, Android, macOS, Windows, Linux.
+Supported build targets: iOS 12+, Android, macOS, Windows, Linux.
 
 ## Install
 
