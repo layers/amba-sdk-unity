@@ -2,6 +2,13 @@
 
 All notable changes to this package are documented here.
 
+## [4.0.8] — 2026-10-16
+
+- After `LinkAccountAsync` adds an Apple or Google identity, the SDK adopts the `anonymous_id` the server returns for the user. Since 2026-10-15 the server gives the account a new anonymous id on such a link, and events tracked afterwards now carry it; they carried the pre-link id.
+- The native plugins carry no file path of the machine that built them. Source locations in the SDK's messages start at `/cargo/` for dependencies and at the package for the SDK's own code.
+- The macOS plugin `Runtime/Plugins/macOS/libamba_core.dylib` has the install name `@rpath/libamba_core.dylib`. It carried the release machine's build path. Unity loads the plugin by its path, so nothing changes in a project.
+- Ships the 4.0.15 core, which reports `amba-core/4.0.15` in the `X-SDK-Version` header and as each event's `sdk_version`.
+
 ## [4.0.7] — 2026-10-15
 
 - Ships the 4.0.14 core: `Inventory.PurchaseAsync` passes a `"store_id"` entry on, so it buys through that store's listing, with its override price, per-user limit and segment. An item an active store limits per user is sold only this way; without `store_id` the purchase answers `409 STORE_PURCHASE_REQUIRED`. The core used to drop `store_id`.

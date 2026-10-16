@@ -263,7 +263,7 @@ namespace Layers.Amba
     /// </summary>
     public static class Amba
     {
-        public const string Version = "4.0.7";
+        public const string Version = "4.0.8";
 
         private static AmbaClient _client;
 
