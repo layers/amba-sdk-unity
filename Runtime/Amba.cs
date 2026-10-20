@@ -81,6 +81,7 @@ namespace Layers.Amba
         public AiNamespace Ai { get; }
         public ConfigNamespace Config { get; }
         public FlagsNamespace Flags { get; }
+        public ExperimentsNamespace Experiments { get; }
 
         // ── gamification ──
         public AchievementsNamespace Achievements { get; }
@@ -133,6 +134,7 @@ namespace Layers.Amba
             Ai = new AiNamespace(bindings);
             Config = new ConfigNamespace(bindings);
             Flags = new FlagsNamespace(bindings);
+            Experiments = new ExperimentsNamespace(bindings);
 
             Achievements = new AchievementsNamespace(bindings);
             Challenges = new ChallengesNamespace(bindings);
@@ -159,7 +161,32 @@ namespace Layers.Amba
             Onboarding = new OnboardingNamespace(bindings);
 
             Diagnostics = new DiagnosticsNamespace(bindings);
+
+            // A sign-out (or reset) starts a new session for
+            // OnExperimentAssigned: every experiment reports again for the
+            // next user.
+            var reporter = Experiments.Reporter;
+            Auth.OnAuthStateChange(session => { if (session == null) reporter.Reset(); });
         }
+
+        /// <summary>
+        /// Subscribe to experiment assignments, for forwarding to your
+        /// analytics. <paramref name="listener"/> runs once per experiment
+        /// per user session (the first <see cref="ExperimentsNamespace.GetVariantAsync"/>
+        /// result for that user while it is subscribed). A sign-out starts a
+        /// new session. Exceptions the listener throws are caught and
+        /// logged; they never reach the <c>GetVariantAsync</c> caller.
+        /// Dispose the returned handle to unsubscribe.
+        /// </summary>
+        public IDisposable OnExperimentAssigned(Action<ExperimentAssignment> listener) =>
+            Experiments.Reporter.Add(listener);
+
+        /// <summary>
+        /// Async form of <see cref="OnExperimentAssigned(Action{ExperimentAssignment})"/>:
+        /// a fault in the returned task is logged, never thrown.
+        /// </summary>
+        public IDisposable OnExperimentAssigned(Func<ExperimentAssignment, Task> listener) =>
+            Experiments.Reporter.Add(listener);
 
         /// <summary>Stable per-install anonymous identifier.</summary>
         public string AnonymousId
@@ -205,6 +232,13 @@ namespace Layers.Amba
                 ["debug"] = debug,
             };
             if (!string.IsNullOrEmpty(baseUrl)) config["base_url"] = baseUrl;
+            // X-App-Version / X-Device-Region / X-Device-OS, each omitted when unknown.
+            var appVersion = AmbaDeviceInfo.AppVersion();
+            if (appVersion != null) config["app_version"] = appVersion;
+            var region = AmbaDeviceInfo.Region();
+            if (region != null) config["device_region"] = region;
+            var os = AmbaDeviceInfo.Os();
+            if (os != null) config["device_os"] = os;
 
             var result = NativeUtil.Invoke(p => Bindings.amba_init(p), JsonConvert.SerializeObject(config), Bindings);
             if (result != null) JsonUtil.ThrowFromRaw(result);
@@ -263,7 +297,7 @@ namespace Layers.Amba
     /// </summary>
     public static class Amba
     {
-        public const string Version = "4.0.8";
+        public const string Version = "4.1.0";
 
         private static AmbaClient _client;
 
@@ -317,6 +351,15 @@ namespace Layers.Amba
         public static AiNamespace Ai => RequireClient().Ai;
         public static ConfigNamespace Config => RequireClient().Config;
         public static FlagsNamespace Flags => RequireClient().Flags;
+        public static ExperimentsNamespace Experiments => RequireClient().Experiments;
+
+        /// <summary>See <see cref="AmbaClient.OnExperimentAssigned"/>.</summary>
+        public static IDisposable OnExperimentAssigned(Action<ExperimentAssignment> listener) =>
+            RequireClient().OnExperimentAssigned(listener);
+
+        /// <summary>See <see cref="AmbaClient.OnExperimentAssigned(Func{ExperimentAssignment, Task})"/>.</summary>
+        public static IDisposable OnExperimentAssigned(Func<ExperimentAssignment, Task> listener) =>
+            RequireClient().OnExperimentAssigned(listener);
 
         // ── gamification ──
         public static AchievementsNamespace Achievements => RequireClient().Achievements;
@@ -1132,6 +1175,261 @@ namespace Layers.Amba
             var data = env["data"];
             if (data == null || data.Type == JTokenType.Null) return Task.FromResult<JToken?>(null);
             return Task.FromResult<JToken?>(data);
+        }
+    }
+
+    // ── experiments ──────────────────────────────────────────────────
+
+    /// <summary>
+    /// The variant the server assigned for one experiment, returned by
+    /// <see cref="ExperimentsNamespace.GetVariantAsync"/> and passed to
+    /// <see cref="AmbaClient.OnExperimentAssigned"/> listeners.
+    /// </summary>
+    public sealed class ExperimentAssignment
+    {
+        /// <summary>The experiment's key.</summary>
+        public string ExperimentKey { get; }
+        /// <summary>The variant key the user is bucketed into (for example <c>control</c>).</summary>
+        public string Variant { get; }
+        /// <summary>The id the server hashed to pick the variant: the signed-in user's id.</summary>
+        public string BucketingId { get; }
+
+        public ExperimentAssignment(string experimentKey, string variant, string bucketingId)
+        {
+            ExperimentKey = experimentKey;
+            Variant = variant;
+            BucketingId = bucketingId;
+        }
+
+        /// <summary>Decode the engine's <c>{experimentKey, variant, bucketingId}</c> object.</summary>
+        public static ExperimentAssignment FromJson(JToken json) =>
+            new ExperimentAssignment(
+                json.Value<string>("experimentKey"),
+                json.Value<string>("variant"),
+                json.Value<string>("bucketingId") ?? "");
+    }
+
+    /// <summary>
+    /// Calls <c>OnExperimentAssigned</c> listeners once per experiment per
+    /// user session: the first time a user's assignment for a key comes back
+    /// while at least one listener is subscribed. <see cref="Reset"/> starts a
+    /// new session. A listener that throws is logged and skipped.
+    /// </summary>
+    internal sealed class ExperimentAssignmentReporter
+    {
+        private const int MaxReported = 10000;
+        private readonly object _lock = new object();
+        private readonly List<Action<ExperimentAssignment>> _listeners = new List<Action<ExperimentAssignment>>();
+        private readonly HashSet<string> _reported = new HashSet<string>();
+        private readonly Queue<string> _order = new Queue<string>();
+
+        public IDisposable Add(Action<ExperimentAssignment> listener)
+        {
+            if (listener == null) throw new ArgumentNullException(nameof(listener));
+            // Wrap so the same delegate added twice is two subscriptions.
+            Action<ExperimentAssignment> entry = a => listener(a);
+            lock (_lock) { _listeners.Add(entry); }
+            return new Subscription(this, entry);
+        }
+
+        /// <summary>
+        /// Async listener: its task's fault is logged, never thrown. (An
+        /// <c>async</c> lambda passed as an <see cref="Action{T}"/> becomes
+        /// <c>async void</c>, whose exception no caller can catch.)
+        /// </summary>
+        public IDisposable Add(Func<ExperimentAssignment, Task> listener)
+        {
+            if (listener == null) throw new ArgumentNullException(nameof(listener));
+            return Add(a =>
+            {
+                var task = listener(a);
+                task?.ContinueWith(
+                    t => LogListenerError(t.Exception?.GetBaseException()),
+                    TaskContinuationOptions.OnlyOnFaulted);
+            });
+        }
+
+        private static void LogListenerError(Exception err) =>
+            DiagnosticsLog.Error($"OnExperimentAssigned listener threw: {err}");
+
+        public ExperimentAssignment Report(ExperimentAssignment assignment)
+        {
+            List<Action<ExperimentAssignment>> snapshot;
+            lock (_lock)
+            {
+                if (_listeners.Count == 0) return assignment;
+                var key = assignment.BucketingId + "\u0000" + assignment.ExperimentKey;
+                if (!_reported.Add(key)) return assignment;
+                _order.Enqueue(key);
+                if (_order.Count > MaxReported) _reported.Remove(_order.Dequeue());
+                snapshot = new List<Action<ExperimentAssignment>>(_listeners);
+            }
+            foreach (var listener in snapshot)
+            {
+                try { listener(assignment); }
+                catch (Exception err) { LogListenerError(err); }
+            }
+            return assignment;
+        }
+
+        public void Reset()
+        {
+            lock (_lock)
+            {
+                _reported.Clear();
+                _order.Clear();
+            }
+        }
+
+        private void Remove(Action<ExperimentAssignment> entry)
+        {
+            lock (_lock) { _listeners.Remove(entry); }
+        }
+
+        private sealed class Subscription : IDisposable
+        {
+            private ExperimentAssignmentReporter _owner;
+            private readonly Action<ExperimentAssignment> _entry;
+            public Subscription(ExperimentAssignmentReporter owner, Action<ExperimentAssignment> entry)
+            {
+                _owner = owner;
+                _entry = entry;
+            }
+            public void Dispose()
+            {
+                _owner?.Remove(_entry);
+                _owner = null;
+            }
+        }
+    }
+
+    /// <summary>
+    /// <c>Amba.Experiments</c> — server-assigned, sticky A/B variants.
+    /// <see cref="GetVariantAsync"/> assigns the signed-in user (the first
+    /// call creates the assignment; later calls return the same variant).
+    /// Call <see cref="TrackExposureAsync"/> when the variant is actually shown.
+    /// </summary>
+    public class ExperimentsNamespace
+    {
+        private readonly INativeMethods _bindings;
+        private readonly ExperimentAssignmentReporter _reporter = new ExperimentAssignmentReporter();
+        public ExperimentsNamespace(INativeMethods bindings) { _bindings = bindings; }
+
+        /// <summary><c>OnExperimentAssigned</c> listeners for this client.</summary>
+        internal ExperimentAssignmentReporter Reporter => _reporter;
+
+        // <generated:experiments>
+        /// <summary>Assign the current user to experiment `key` (sticky) and return the variant. The first result for a user in a session also reaches <see cref="Amba.OnExperimentAssigned"/> listeners.</summary>
+        public Task<ExperimentAssignment> GetVariantAsync(string key)
+        {
+            var json = JsonUtil.ExpectJson(NativeUtil.InvokeUnary(_bindings.amba_experiments_get_variant, key, _bindings));
+            return Task.FromResult(_reporter.Report(ExperimentAssignment.FromJson(json)));
+        }
+
+        /// <summary>Record that the current user saw their variant of experiment `key`. The user needs an assignment first (<see cref="GetVariantAsync"/>).</summary>
+        public Task TrackExposureAsync(string key)
+        {
+            JsonUtil.ExpectJson(NativeUtil.InvokeUnary(_bindings.amba_experiments_track_exposure, key, _bindings));
+            return Task.CompletedTask;
+        }
+        // </generated:experiments>
+    }
+
+    /// <summary>
+    /// Values for the <c>X-App-Version</c>, <c>X-Device-Region</c> and
+    /// <c>X-Device-OS</c> request headers, read once at initialize. Each is
+    /// <c>null</c> when unknown, which omits the header. Unity's
+    /// <c>UnityEngine.Application</c> is read through reflection (this
+    /// assembly carries no engine reference), so a plain .NET test host
+    /// gets <c>null</c> for the app version and its own OS.
+    /// </summary>
+    internal static class AmbaDeviceInfo
+    {
+        private static Type ApplicationType() =>
+            Type.GetType("UnityEngine.Application, UnityEngine.CoreModule")
+            ?? Type.GetType("UnityEngine.Application, UnityEngine");
+
+        /// <summary><c>Application.version</c> (the Player Settings version).</summary>
+        public static string AppVersion()
+        {
+            try
+            {
+                var v = ApplicationType()?.GetProperty("version")?.GetValue(null) as string;
+                return string.IsNullOrWhiteSpace(v) ? null : v.Trim();
+            }
+            catch (Exception) { return null; }
+        }
+
+        /// <summary>The current culture's ISO 3166-1 alpha-2 region, uppercased.</summary>
+        public static string Region()
+        {
+            try
+            {
+                var name = System.Globalization.CultureInfo.CurrentCulture.Name;
+                if (!string.IsNullOrEmpty(name))
+                {
+                    var parts = name.Split('-', '_');
+                    for (var i = 1; i < parts.Length; i++)
+                    {
+                        var part = parts[i];
+                        if (part.Length == 1) break;
+                        if (part.Length == 2 && char.IsLetter(part[0]) && char.IsLetter(part[1]) && part[0] < 128 && part[1] < 128)
+                            return part.ToUpperInvariant();
+                    }
+                }
+                var region = System.Globalization.RegionInfo.CurrentRegion.TwoLetterISORegionName;
+                // "IV" is the invariant culture's placeholder, never a device region.
+                if (region != null && region.Length == 2 && region != "IV"
+                    && char.IsLetter(region[0]) && char.IsLetter(region[1])
+                    && region[0] < 128 && region[1] < 128)
+                    return region.ToUpperInvariant();
+            }
+            catch (Exception) { }
+            return null;
+        }
+
+        /// <summary>
+        /// <c>ios</c>, <c>android</c>, <c>macos</c>, <c>windows</c>,
+        /// <c>linux</c>, or <c>other</c>, from <c>Application.platform</c>
+        /// (the host OS outside Unity).
+        /// </summary>
+        public static string Os()
+        {
+            try
+            {
+                var platform = ApplicationType()?.GetProperty("platform")?.GetValue(null)?.ToString();
+                if (!string.IsNullOrEmpty(platform)) return OsFromRuntimePlatform(platform);
+                if (RuntimeInformation.IsOSPlatform(OSPlatform.OSX)) return "macos";
+                if (RuntimeInformation.IsOSPlatform(OSPlatform.Windows)) return "windows";
+                if (RuntimeInformation.IsOSPlatform(OSPlatform.Linux)) return "linux";
+                return "other";
+            }
+            catch (Exception) { return null; }
+        }
+
+        /// <summary>Map a <c>UnityEngine.RuntimePlatform</c> name to an <c>X-Device-OS</c> value.</summary>
+        internal static string OsFromRuntimePlatform(string platform)
+        {
+            switch (platform)
+            {
+                case "IPhonePlayer": return "ios";
+                case "Android": return "android";
+                case "OSXPlayer":
+                case "OSXEditor":
+                case "OSXServer": return "macos";
+                case "WindowsPlayer":
+                case "WindowsEditor":
+                case "WindowsServer": return "windows";
+                case "LinuxPlayer":
+                case "LinuxEditor":
+                case "LinuxServer":
+                case "EmbeddedLinuxArm64":
+                case "EmbeddedLinuxArm32":
+                case "EmbeddedLinuxX64":
+                case "EmbeddedLinuxX86": return "linux";
+                case "WebGLPlayer": return "web";
+                default: return "other";
+            }
         }
     }
 
@@ -2237,6 +2535,8 @@ namespace Layers.Amba
         // <generated:unity.bindings.interface>
         IntPtr amba_offerings(IntPtr offeringId);
         IntPtr amba_entitlements_restore();
+        IntPtr amba_experiments_get_variant(IntPtr key);
+        IntPtr amba_experiments_track_exposure(IntPtr key);
         // </generated:unity.bindings.interface>
     }
 
@@ -2453,6 +2753,8 @@ namespace Layers.Amba
         // <generated:unity.bindings.delegation>
         public IntPtr amba_offerings(IntPtr offeringId) => NativeMethods.amba_offerings(offeringId);
         public IntPtr amba_entitlements_restore() => NativeMethods.amba_entitlements_restore();
+        public IntPtr amba_experiments_get_variant(IntPtr key) => NativeMethods.amba_experiments_get_variant(key);
+        public IntPtr amba_experiments_track_exposure(IntPtr key) => NativeMethods.amba_experiments_track_exposure(key);
         // </generated:unity.bindings.delegation>
     }
 
@@ -2807,6 +3109,8 @@ namespace Layers.Amba
         // <generated:unity.bindings.dllimport>
         [DllImport(LIB)] public static extern IntPtr amba_offerings(IntPtr offeringId);
         [DllImport(LIB)] public static extern IntPtr amba_entitlements_restore();
+        [DllImport(LIB)] public static extern IntPtr amba_experiments_get_variant(IntPtr key);
+        [DllImport(LIB)] public static extern IntPtr amba_experiments_track_exposure(IntPtr key);
         // </generated:unity.bindings.dllimport>
     }
 }

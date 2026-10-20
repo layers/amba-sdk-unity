@@ -1228,6 +1228,78 @@ namespace Layers.Amba.Tests
             Assert.That(_fake.Calls[_fake.Calls.Count - 1].Args[0], Is.EqualTo("summer"));
         }
 
+        // ── experiments ──────────────────────────────────────────────
+
+        [Test]
+        public async System.Threading.Tasks.Task Experiments_GetVariant_DecodesAssignment()
+        {
+            _fake.Enqueue(
+                "experiments_get_variant",
+                "{\"experimentKey\":\"paywall_copy\",\"variant\":\"b\",\"bucketingId\":\"user-42\"}");
+
+            var a = await _client.Experiments.GetVariantAsync("paywall_copy");
+
+            Assert.That(a.ExperimentKey, Is.EqualTo("paywall_copy"));
+            Assert.That(a.Variant, Is.EqualTo("b"));
+            Assert.That(a.BucketingId, Is.EqualTo("user-42"));
+            Assert.That(_fake.Calls[_fake.Calls.Count - 1].Args[0], Is.EqualTo("paywall_copy"));
+        }
+
+        [Test]
+        public async System.Threading.Tasks.Task Experiments_TrackExposure_ForwardsKey()
+        {
+            _fake.Enqueue("experiments_track_exposure", "{\"experimentKey\":\"paywall_copy\",\"variant\":\"b\"}");
+
+            await _client.Experiments.TrackExposureAsync("paywall_copy");
+
+            Assert.That(_fake.Calls[_fake.Calls.Count - 1].Name, Is.EqualTo("experiments_track_exposure"));
+            Assert.That(_fake.Calls[_fake.Calls.Count - 1].Args[0], Is.EqualTo("paywall_copy"));
+        }
+
+        [Test]
+        public async System.Threading.Tasks.Task OnExperimentAssigned_FiresOncePerExperimentPerSession()
+        {
+            const string body = "{\"experimentKey\":\"exp\",\"variant\":\"control\",\"bucketingId\":\"u1\"}";
+            var seen = new List<ExperimentAssignment>();
+            var handle = _client.OnExperimentAssigned(a => seen.Add(a));
+            _client.OnExperimentAssigned(_ => throw new InvalidOperationException("listener bug"));
+            _client.OnExperimentAssigned(async _ =>
+            {
+                await System.Threading.Tasks.Task.Yield();
+                throw new InvalidOperationException("async listener bug");
+            });
+
+            _fake.Enqueue("experiments_get_variant", body);
+            await _client.Experiments.GetVariantAsync("exp");
+            _fake.Enqueue("experiments_get_variant", body);
+            await _client.Experiments.GetVariantAsync("exp");
+            Assert.That(seen.Count, Is.EqualTo(1));
+
+            _fake.Enqueue("reset", null);
+            await _client.ResetAsync();
+            _fake.Enqueue("experiments_get_variant", body);
+            await _client.Experiments.GetVariantAsync("exp");
+            Assert.That(seen.Count, Is.EqualTo(2));
+
+            handle.Dispose();
+            _fake.Enqueue("reset", null);
+            await _client.ResetAsync();
+            _fake.Enqueue("experiments_get_variant", body);
+            await _client.Experiments.GetVariantAsync("exp");
+            Assert.That(seen.Count, Is.EqualTo(2));
+        }
+
+        [Test]
+        public void DeviceInfo_MapsUnityPlatformsToDeviceOs()
+        {
+            Assert.That(AmbaDeviceInfo.OsFromRuntimePlatform("IPhonePlayer"), Is.EqualTo("ios"));
+            Assert.That(AmbaDeviceInfo.OsFromRuntimePlatform("Android"), Is.EqualTo("android"));
+            Assert.That(AmbaDeviceInfo.OsFromRuntimePlatform("OSXEditor"), Is.EqualTo("macos"));
+            Assert.That(AmbaDeviceInfo.OsFromRuntimePlatform("WindowsPlayer"), Is.EqualTo("windows"));
+            Assert.That(AmbaDeviceInfo.OsFromRuntimePlatform("LinuxPlayer"), Is.EqualTo("linux"));
+            Assert.That(AmbaDeviceInfo.OsFromRuntimePlatform("tvOS"), Is.EqualTo("other"));
+        }
+
         // ── ai ───────────────────────────────────────────────────────
 
         [Test]
@@ -2372,6 +2444,7 @@ namespace Layers.Amba.Tests
 
         public IntPtr amba_config_fetch() => Respond("config_fetch");
         public IntPtr amba_flags_fetch() => Respond("flags_fetch");
+        public IntPtr amba_flags_get(IntPtr key) => Respond("flags_get", FromPtr(key));
 
         // ── gamification ──
         public IntPtr amba_achievements_get_all() => Respond("achievements_get_all");
@@ -2419,6 +2492,7 @@ namespace Layers.Amba.Tests
         public IntPtr amba_friends_send_request(IntPtr userId) => Respond("friends_send_request", FromPtr(userId));
         public IntPtr amba_friends_accept_request(IntPtr friendshipId) => Respond("friends_accept_request", FromPtr(friendshipId));
         public IntPtr amba_friends_decline_request(IntPtr friendshipId) => Respond("friends_decline_request", FromPtr(friendshipId));
+        public IntPtr amba_friends_remove_friend(IntPtr userId) => Respond("friends_remove_friend", FromPtr(userId));
 
         public IntPtr amba_groups_create(IntPtr paramsJson) => Respond("groups_create", FromPtr(paramsJson));
         public IntPtr amba_groups_get(IntPtr id) => Respond("groups_get", FromPtr(id));
@@ -2489,6 +2563,8 @@ namespace Layers.Amba.Tests
         // ── offerings + restore (codegen'd interface members) ──
         public IntPtr amba_offerings(IntPtr offeringId) => Respond("offerings", FromPtr(offeringId));
         public IntPtr amba_entitlements_restore() => Respond("entitlements_restore");
+        public IntPtr amba_experiments_get_variant(IntPtr key) => Respond("experiments_get_variant", FromPtr(key));
+        public IntPtr amba_experiments_track_exposure(IntPtr key) => Respond("experiments_track_exposure", FromPtr(key));
     }
 
     public readonly struct Call

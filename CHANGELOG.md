@@ -2,6 +2,14 @@
 
 All notable changes to this package are documented here.
 
+## [4.1.0] — 2026-10-19
+
+- `Amba.Experiments.GetVariantAsync(key)` assigns the signed-in user to experiment `key` and returns an `ExperimentAssignment` (`ExperimentKey`, `Variant`, `BucketingId`). The assignment is sticky: later calls return the same variant. `BucketingId` is the user id the server hashed to pick the variant. `TrackExposureAsync(key)` records that the user saw it.
+- `Amba.OnExperimentAssigned(listener)` calls the listener once per experiment per user session (a sign-out or reset starts a new session). An exception the listener throws is caught and logged; it never reaches the `GetVariantAsync` caller. Dispose the returned handle to unsubscribe.
+- Requests carry `X-App-Version` (`Application.version`), `X-Device-Region` (the current culture's region) and `X-Device-OS` (from `Application.platform`) when known. Segments can target these values.
+- `INativeMethods` gains `amba_experiments_get_variant(IntPtr key)` and `amba_experiments_track_exposure(IntPtr key)`. A class that implements `INativeMethods` (a custom transport or a test fake) adds both.
+- Built on the 4.1.0 core.
+
 ## [4.0.8] — 2026-10-16
 
 - After `LinkAccountAsync` adds an Apple or Google identity, the SDK adopts the `anonymous_id` the server returns for the user. Since 2026-10-15 the server gives the account a new anonymous id on such a link, and events tracked afterwards now carry it; they carried the pre-link id.
