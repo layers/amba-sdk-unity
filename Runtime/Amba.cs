@@ -217,8 +217,18 @@ namespace Layers.Amba
         /// calls into here. Tests can call this directly on a client wired with
         /// a fake binding to verify the config JSON shape without loading the
         /// native library.
+        ///
+        /// <paramref name="configDefaults"/> are the remote config values the
+        /// app ships with, keyed by config key: <see cref="ConfigNamespace.GetCached{T}"/>
+        /// returns one when the device holds no fetched or cached value for
+        /// the key, and <see cref="FlagsNamespace.IsEnabled"/> reads a
+        /// <c>bool</c> entry under a flag's name the same way. The SDK keeps
+        /// the last fetched config and flags in <paramref name="cacheDir"/>
+        /// (by default <c>Application.persistentDataPath/com.layers.amba</c>)
+        /// per project and user, and serves them on the next launch.
         /// </summary>
-        public Task InitializeAsync(string apiKey, string baseUrl = null, bool consentRequired = false, bool debug = false)
+        public Task InitializeAsync(string apiKey, string baseUrl = null, bool consentRequired = false, bool debug = false,
+            IDictionary<string, object> configDefaults = null, string cacheDir = null)
         {
             if (string.IsNullOrEmpty(apiKey))
                 throw new ArgumentException("apiKey must not be empty", nameof(apiKey));
@@ -239,6 +249,11 @@ namespace Layers.Amba
             if (region != null) config["device_region"] = region;
             var os = AmbaDeviceInfo.Os();
             if (os != null) config["device_os"] = os;
+            // The config and flags cache: an app-private directory, and the
+            // values the app ships with.
+            var resolvedCacheDir = cacheDir ?? AmbaDeviceInfo.CacheDir();
+            if (!string.IsNullOrEmpty(resolvedCacheDir)) config["cache_dir"] = resolvedCacheDir;
+            if (configDefaults != null && configDefaults.Count > 0) config["config_defaults"] = configDefaults;
 
             var result = NativeUtil.Invoke(p => Bindings.amba_init(p), JsonConvert.SerializeObject(config), Bindings);
             if (result != null) JsonUtil.ThrowFromRaw(result);
@@ -297,7 +312,7 @@ namespace Layers.Amba
     /// </summary>
     public static class Amba
     {
-        public const string Version = "4.1.0";
+        public const string Version = "4.2.0";
 
         private static AmbaClient _client;
 
@@ -313,7 +328,10 @@ namespace Layers.Amba
         /// <see cref="ResetAsync"/> first to release the Rust core's
         /// singleton, then re-call ConfigureAsync with the new key.
         /// </remarks>
-        public static async Task ConfigureAsync(string apiKey, string baseUrl = null, bool consentRequired = false, bool debug = false)
+        /// <param name="configDefaults">The remote config values the app
+        /// ships with; see <see cref="AmbaClient.InitializeAsync"/>.</param>
+        public static async Task ConfigureAsync(string apiKey, string baseUrl = null, bool consentRequired = false, bool debug = false,
+            IDictionary<string, object> configDefaults = null)
         {
             // Validate before constructing real bindings so a misconfigured
             // app fails fast with a clean ArgumentException rather than
@@ -323,7 +341,7 @@ namespace Layers.Amba
 
             var bindings = new DefaultNativeMethods();
             var client = new AmbaClient(bindings);
-            await client.InitializeAsync(apiKey, baseUrl, consentRequired, debug);
+            await client.InitializeAsync(apiKey, baseUrl, consentRequired, debug, configDefaults);
             _client = client;
         }
 
@@ -1149,19 +1167,84 @@ namespace Layers.Amba
     public class ConfigNamespace
     {
         private readonly INativeMethods _bindings;
+        private readonly CachedReads.FirstReadRefresh _refresh = new CachedReads.FirstReadRefresh();
         public ConfigNamespace(INativeMethods bindings) { _bindings = bindings; }
 
         public Task<JToken> FetchAsync() =>
             Task.FromResult(JsonUtil.ExpectJson(NativeUtil.CallReturnString(_bindings.amba_config_fetch, _bindings)));
+
+        /// <summary>
+        /// The value for <paramref name="key"/> without a request, so the
+        /// first frame can read config: the last fetch, else the value
+        /// cached on the device from an earlier launch, else
+        /// <c>configDefaults</c>; <c>null</c> when none has it. The first
+        /// cached read for each user (and for the signed-out state) starts a
+        /// background fetch that replaces the cached values.
+        /// </summary>
+        public JToken GetCached(string key)
+        {
+            _refresh.Once(_bindings, _bindings.amba_config_fetch);
+            var raw = NativeUtil.InvokeUnary(_bindings.amba_config_get_cached, key, _bindings);
+            var data = JsonUtil.ExpectJson(raw)["data"];
+            return data == null || data.Type == JTokenType.Null ? null : data;
+        }
+
+        /// <summary>
+        /// <see cref="GetCached(string)"/> as <typeparamref name="T"/>, else
+        /// <paramref name="defaultValue"/>. A value of another type than the
+        /// default (a string where the default is an <c>int</c>) returns the
+        /// default; JSON integers read as floating point too.
+        /// </summary>
+        /// <example><code>var copy = Amba.Config.GetCached("welcome_copy", "Welcome!");</code></example>
+        public T GetCached<T>(string key, T defaultValue)
+        {
+            var token = GetCached(key);
+            if (token == null || !CachedReads.KindMatches(token.Type, typeof(T))) return defaultValue;
+            try { return token.ToObject<T>(); }
+            catch (Exception) { return defaultValue; }
+        }
     }
 
     public class FlagsNamespace
     {
         private readonly INativeMethods _bindings;
+        private readonly CachedReads.FirstReadRefresh _refresh = new CachedReads.FirstReadRefresh();
         public FlagsNamespace(INativeMethods bindings) { _bindings = bindings; }
 
         public Task<JToken> FetchAsync() =>
             Task.FromResult(JsonUtil.ExpectJson(NativeUtil.CallReturnString(_bindings.amba_flags_fetch, _bindings)));
+
+        /// <summary>
+        /// The assignment the SDK holds for flag <paramref name="key"/>
+        /// without a request (the last fetch, else the device cache), or
+        /// <c>null</c>.
+        /// </summary>
+        public JToken GetCached(string key)
+        {
+            StartRefresh();
+            var raw = NativeUtil.InvokeUnary(_bindings.amba_flags_get_cached, key, _bindings);
+            var data = JsonUtil.ExpectJson(raw)["data"];
+            return data == null || data.Type == JTokenType.Null ? null : data;
+        }
+
+        /// <summary>
+        /// Whether flag <paramref name="key"/> is on without a request: the
+        /// held assignment, else a <c>bool</c> <c>configDefaults</c> entry
+        /// under the name, else <paramref name="defaultValue"/>. A flag
+        /// switched off on the server is left out of the next fetch, so it
+        /// reads as <paramref name="defaultValue"/> from then on. The first
+        /// cached flag read for each user (and for the signed-out state)
+        /// starts a background fetch that replaces the cached values.
+        /// </summary>
+        public bool IsEnabled(string key, bool defaultValue = false)
+        {
+            StartRefresh();
+            var raw = NativeUtil.InvokeUnary(_bindings.amba_flags_is_enabled, key, _bindings);
+            var data = JsonUtil.ExpectJson(raw)["data"];
+            return data != null && data.Type == JTokenType.Boolean ? data.Value<bool>() : defaultValue;
+        }
+
+        private void StartRefresh() => _refresh.Once(_bindings, _bindings.amba_flags_fetch);
 
         /// <summary>
         /// Single-flag lookup (SDK 4.0). Wraps
@@ -1175,6 +1258,62 @@ namespace Layers.Amba
             var data = env["data"];
             if (data == null || data.Type == JTokenType.Null) return Task.FromResult<JToken?>(null);
             return Task.FromResult<JToken?>(data);
+        }
+    }
+
+    /// <summary>Helpers for the cached config and flags reads.</summary>
+    internal static class CachedReads
+    {
+        /// <summary>
+        /// Runs a background refresh once per identity: the first cached
+        /// read of config (or flags) fetches fresh values, and so does the
+        /// first one after a sign-in or sign-out changes who is reading.
+        /// </summary>
+        internal sealed class FirstReadRefresh
+        {
+            private readonly object _lock = new object();
+            private string _refreshedFor;
+
+            public void Once(INativeMethods bindings, Func<IntPtr> fetch)
+            {
+                string identity;
+                try { identity = NativeUtil.CallReturnString(bindings.amba_app_user_id, bindings) ?? ""; }
+                catch (Exception) { identity = ""; }
+                lock (_lock)
+                {
+                    if (_refreshedFor == identity) return;
+                    _refreshedFor = identity;
+                }
+                RefreshInBackground(bindings, fetch);
+            }
+        }
+
+        /// <summary>
+        /// Run one blocking fetch on the thread pool (the core is
+        /// thread-safe and process-wide). A failure leaves the cached
+        /// values in place.
+        /// </summary>
+        public static void RefreshInBackground(INativeMethods bindings, Func<IntPtr> fetch)
+        {
+            Task.Run(() =>
+            {
+                try { NativeUtil.CallReturnString(fetch, bindings); }
+                catch (Exception) { /* offline: the cached values stay */ }
+            });
+        }
+
+        /// <summary>Whether a JSON token of <paramref name="kind"/> reads as <paramref name="target"/>.</summary>
+        public static bool KindMatches(JTokenType kind, Type target)
+        {
+            target = Nullable.GetUnderlyingType(target) ?? target;
+            if (target == typeof(string)) return kind == JTokenType.String;
+            if (target == typeof(bool)) return kind == JTokenType.Boolean;
+            if (target == typeof(int) || target == typeof(long) || target == typeof(short)
+                || target == typeof(uint) || target == typeof(ulong))
+                return kind == JTokenType.Integer;
+            if (target == typeof(double) || target == typeof(float) || target == typeof(decimal))
+                return kind == JTokenType.Float || kind == JTokenType.Integer;
+            return true;
         }
     }
 
@@ -1356,6 +1495,25 @@ namespace Layers.Amba
             {
                 var v = ApplicationType()?.GetProperty("version")?.GetValue(null) as string;
                 return string.IsNullOrWhiteSpace(v) ? null : v.Trim();
+            }
+            catch (Exception) { return null; }
+        }
+
+        /// <summary>
+        /// <c>Application.persistentDataPath/com.layers.amba</c>, the
+        /// app-private directory the core keeps the config and flags cache
+        /// in; <c>null</c> outside Unity or when it can't be created, which
+        /// keeps the cache in memory.
+        /// </summary>
+        public static string CacheDir()
+        {
+            try
+            {
+                var root = ApplicationType()?.GetProperty("persistentDataPath")?.GetValue(null) as string;
+                if (string.IsNullOrWhiteSpace(root)) return null;
+                var dir = System.IO.Path.Combine(root, "com.layers.amba");
+                System.IO.Directory.CreateDirectory(dir);
+                return dir;
             }
             catch (Exception) { return null; }
         }
@@ -2422,6 +2580,10 @@ namespace Layers.Amba
         IntPtr amba_config_fetch();
         IntPtr amba_flags_fetch();
         IntPtr amba_flags_get(IntPtr key);
+        // On-device reads (SDK 4.2): `{"data": …}` envelopes, never a network wait.
+        IntPtr amba_config_get_cached(IntPtr key);
+        IntPtr amba_flags_get_cached(IntPtr key);
+        IntPtr amba_flags_is_enabled(IntPtr key);
 
         // ── gamification ──
         IntPtr amba_achievements_get_all();
@@ -2643,6 +2805,9 @@ namespace Layers.Amba
         public IntPtr amba_config_fetch() => NativeMethods.amba_config_fetch();
         public IntPtr amba_flags_fetch() => NativeMethods.amba_flags_fetch();
         public IntPtr amba_flags_get(IntPtr key) => NativeMethods.amba_flags_get(key);
+        public IntPtr amba_config_get_cached(IntPtr key) => NativeMethods.amba_config_get_cached(key);
+        public IntPtr amba_flags_get_cached(IntPtr key) => NativeMethods.amba_flags_get_cached(key);
+        public IntPtr amba_flags_is_enabled(IntPtr key) => NativeMethods.amba_flags_is_enabled(key);
 
         // ── gamification ──
         public IntPtr amba_achievements_get_all() => NativeMethods.amba_achievements_get_all();
@@ -3006,6 +3171,9 @@ namespace Layers.Amba
         [DllImport(LIB)] public static extern IntPtr amba_config_fetch();
         [DllImport(LIB)] public static extern IntPtr amba_flags_fetch();
         [DllImport(LIB)] public static extern IntPtr amba_flags_get(IntPtr key);
+        [DllImport(LIB)] public static extern IntPtr amba_config_get_cached(IntPtr key);
+        [DllImport(LIB)] public static extern IntPtr amba_flags_get_cached(IntPtr key);
+        [DllImport(LIB)] public static extern IntPtr amba_flags_is_enabled(IntPtr key);
 
         // ── gamification ──
         [DllImport(LIB)] public static extern IntPtr amba_achievements_get_all();

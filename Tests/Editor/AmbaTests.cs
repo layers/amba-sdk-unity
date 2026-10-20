@@ -1228,6 +1228,109 @@ namespace Layers.Amba.Tests
             Assert.That(_fake.Calls[_fake.Calls.Count - 1].Args[0], Is.EqualTo("summer"));
         }
 
+        // ── config + flags cache ─────────────────────────────────────
+
+        [Test]
+        public async System.Threading.Tasks.Task InitializeAsync_SendsConfigDefaultsAndCacheDir()
+        {
+            _fake.Enqueue("init", null);
+
+            await _client.InitializeAsync(
+                "pk_test_123",
+                configDefaults: new Dictionary<string, object> { ["welcome_copy"] = "Hi", ["max_items"] = 20 },
+                cacheDir: "/tmp/amba-cache");
+
+            var root = JToken.Parse(_fake.Calls[0].Args[0]);
+            Assert.That((string)root["config_defaults"]["welcome_copy"], Is.EqualTo("Hi"));
+            Assert.That((int)root["config_defaults"]["max_items"], Is.EqualTo(20));
+            Assert.That((string)root["cache_dir"], Is.EqualTo("/tmp/amba-cache"));
+        }
+
+        [Test]
+        public async System.Threading.Tasks.Task InitializeAsync_OmitsEmptyConfigDefaults()
+        {
+            _fake.Enqueue("init", null);
+            await _client.InitializeAsync("pk_test_123");
+            var root = JToken.Parse(_fake.Calls[0].Args[0]);
+            Assert.That(root["config_defaults"], Is.Null);
+        }
+
+        [Test]
+        public void Config_GetCached_ReturnsHeldValueOrDefault()
+        {
+            _fake.Enqueue("config_fetch", "{\"version\":null,\"values\":{}}");
+            _fake.SeedCachedConfig("copy", "\"cached copy\"");
+            _fake.SeedCachedConfig("max", "20");
+            _fake.SeedCachedConfig("beta", "true");
+
+            Assert.That(_client.Config.GetCached("copy", "fallback"), Is.EqualTo("cached copy"));
+            Assert.That(_client.Config.GetCached("max", 5), Is.EqualTo(20));
+            Assert.That(_client.Config.GetCached("max", 5.0), Is.EqualTo(20.0));
+            Assert.That(_client.Config.GetCached("beta", false), Is.True);
+            Assert.That(_client.Config.GetCached("missing", "fallback"), Is.EqualTo("fallback"));
+            // Another type than the default returns the default.
+            Assert.That(_client.Config.GetCached("max", "x"), Is.EqualTo("x"));
+            Assert.That(_client.Config.GetCached("beta", 7), Is.EqualTo(7));
+            Assert.That(_client.Config.GetCached("missing"), Is.Null);
+            Assert.That((string)_client.Config.GetCached("copy"), Is.EqualTo("cached copy"));
+        }
+
+        [Test]
+        public async System.Threading.Tasks.Task Config_GetCached_StartsOneBackgroundFetch()
+        {
+            _fake.Enqueue("config_fetch", "{\"version\":null,\"values\":{}}");
+
+            _client.Config.GetCached("a", 1);
+            _client.Config.GetCached("b", 2);
+            for (var i = 0; i < 400 && _fake.CountCalls("config_fetch") == 0; i++)
+                await System.Threading.Tasks.Task.Delay(5);
+
+            Assert.That(_fake.CountCalls("config_fetch"), Is.EqualTo(1));
+            Assert.That(_fake.CountCalls("flags_fetch"), Is.EqualTo(0));
+
+            // A sign-in changes who is reading: the next cached read refreshes.
+            _fake.Enqueue("config_fetch", "{\"version\":null,\"values\":{}}");
+            _fake.SeededAppUserId = "user-9";
+            _client.Config.GetCached("a", 1);
+            _client.Config.GetCached("b", 2);
+            for (var i = 0; i < 400 && _fake.CountCalls("config_fetch") < 2; i++)
+                await System.Threading.Tasks.Task.Delay(5);
+            Assert.That(_fake.CountCalls("config_fetch"), Is.EqualTo(2));
+        }
+
+        [Test]
+        public async System.Threading.Tasks.Task Flags_IsEnabledAndGetCached_ReadTheCore()
+        {
+            _fake.Enqueue("flags_fetch", "[]");
+            _fake.SeedFlagEnabled("new_ui", true);
+            _fake.SeedFlagEnabled("off", false);
+            _fake.SeedCachedFlag("new_ui", "{\"name\":\"new_ui\",\"enabled\":true,\"variant\":\"B\"}");
+
+            Assert.That(_client.Flags.IsEnabled("new_ui"), Is.True);
+            Assert.That(_client.Flags.IsEnabled("off", defaultValue: true), Is.False);
+            Assert.That(_client.Flags.IsEnabled("unknown"), Is.False);
+            Assert.That(_client.Flags.IsEnabled("unknown", defaultValue: true), Is.True);
+            Assert.That((string)_client.Flags.GetCached("new_ui")["variant"], Is.EqualTo("B"));
+            Assert.That(_client.Flags.GetCached("unknown"), Is.Null);
+
+            for (var i = 0; i < 400 && _fake.CountCalls("flags_fetch") == 0; i++)
+                await System.Threading.Tasks.Task.Delay(5);
+            Assert.That(_fake.CountCalls("flags_fetch"), Is.EqualTo(1));
+        }
+
+        [Test]
+        public async System.Threading.Tasks.Task Flags_GetAsync_ReadsTheDataEnvelope()
+        {
+            _fake.Enqueue("flags_get", "{\"data\":{\"name\":\"on\",\"enabled\":true}}");
+            _fake.Enqueue("flags_get", "{\"data\":null}");
+
+            var on = await _client.Flags.GetAsync("on");
+            var off = await _client.Flags.GetAsync("off");
+
+            Assert.That((string)on["name"], Is.EqualTo("on"));
+            Assert.That(off, Is.Null);
+        }
+
         // ── experiments ──────────────────────────────────────────────
 
         [Test]
@@ -2309,20 +2412,56 @@ namespace Layers.Amba.Tests
 
         private IntPtr Respond(string expectedMethod, params string[] args)
         {
-            Calls.Add(new Call(expectedMethod, args));
+            // Locked: the first cached config / flags read calls the fetch
+            // from a thread-pool task.
+            (string method, string response, bool nullPtr) next;
+            lock (Calls)
+            {
+                Calls.Add(new Call(expectedMethod, args));
 
-            if (_responses.Count == 0)
+                if (_responses.Count == 0)
+                    throw new InvalidOperationException(
+                        $"Fake: no enqueued response for `{expectedMethod}`. " +
+                        "Did you forget to call Enqueue() in your test?");
+
+                next = _responses.Dequeue();
+            }
+            if (next.method != expectedMethod)
                 throw new InvalidOperationException(
-                    $"Fake: no enqueued response for `{expectedMethod}`. " +
-                    "Did you forget to call Enqueue() in your test?");
+                    $"Fake: enqueued response was for `{next.method}` but actual call was `{expectedMethod}`.");
 
-            var (method, response, nullPtr) = _responses.Dequeue();
-            if (method != expectedMethod)
-                throw new InvalidOperationException(
-                    $"Fake: enqueued response was for `{method}` but actual call was `{expectedMethod}`.");
-
-            return nullPtr ? IntPtr.Zero : ToOwnedPtr(response);
+            return next.nullPtr ? IntPtr.Zero : ToOwnedPtr(next.response);
         }
+
+        /// <summary>How many calls named <paramref name="method"/> were made.</summary>
+        public int CountCalls(string method)
+        {
+            lock (Calls)
+            {
+                var n = 0;
+                foreach (var c in Calls) if (c.Name == method) n++;
+                return n;
+            }
+        }
+
+        // The on-device reads answer from these seeds (JSON per key), not
+        // the response queue: they never block and run beside a refresh.
+        private readonly Dictionary<string, string> _cachedConfig = new();
+        private readonly Dictionary<string, string> _cachedFlags = new();
+        private readonly Dictionary<string, bool> _cachedEnabled = new();
+
+        public void SeedCachedConfig(string key, string json) => _cachedConfig[key] = json;
+        public void SeedCachedFlag(string key, string json) => _cachedFlags[key] = json;
+        public void SeedFlagEnabled(string key, bool value) => _cachedEnabled[key] = value;
+
+        private static IntPtr DataEnvelope(string json) => ToOwnedPtr("{\"data\":" + (json ?? "null") + "}");
+
+        public IntPtr amba_config_get_cached(IntPtr key) =>
+            DataEnvelope(_cachedConfig.TryGetValue(FromPtr(key), out var v) ? v : null);
+        public IntPtr amba_flags_get_cached(IntPtr key) =>
+            DataEnvelope(_cachedFlags.TryGetValue(FromPtr(key), out var v) ? v : null);
+        public IntPtr amba_flags_is_enabled(IntPtr key) =>
+            DataEnvelope(_cachedEnabled.TryGetValue(FromPtr(key), out var v) ? (v ? "true" : "false") : null);
 
         private static IntPtr ToOwnedPtr(string s)
         {
@@ -2344,7 +2483,10 @@ namespace Layers.Amba.Tests
         public IntPtr amba_init(IntPtr configJson) => Respond("init", FromPtr(configJson));
         public IntPtr amba_reset() => Respond("reset");
         public IntPtr amba_anonymous_id() => Respond("anonymous_id");
-        public IntPtr amba_app_user_id() => Respond("app_user_id");
+        // A seed outside the response queue: the cached config / flags reads
+        // check the current user beside a background refresh.
+        public string SeededAppUserId;
+        public IntPtr amba_app_user_id() => ToOwnedPtr(SeededAppUserId);
         public uint amba_is_authenticated() => _isAuthenticated;
         public void amba_string_free(IntPtr ptr) => Marshal.FreeHGlobal(ptr);
         public void amba_set_debug(uint enabled) { LastSetDebug = enabled; }

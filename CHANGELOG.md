@@ -2,6 +2,17 @@
 
 All notable changes to this package are documented here.
 
+## [4.2.0] — 2026-10-20
+
+- `Amba.ConfigureAsync(..., configDefaults)`: the remote config values your app ships with, keyed by config key.
+- `Amba.Config.GetCached<T>(key, defaultValue)` returns a config value with no request, so the first frame can read config: the last fetch, else the value cached on the device from an earlier launch, else `configDefaults`, else `defaultValue`. A value of another type than `defaultValue` returns `defaultValue`. `GetCached(key)` returns the raw `JToken` (or `null`).
+- `Amba.Flags.IsEnabled(key, defaultValue = false)` and `Amba.Flags.GetCached(key)` read flags the same way. `IsEnabled` reads a `bool` `configDefaults` entry under the flag's name before `defaultValue`.
+- The SDK keeps the last config and flags it fetched in `Application.persistentDataPath/com.layers.amba`, per project and signed-in user, and serves them on the next launch. A signed-in user reads only their own values; before sign-in the SDK reads the values fetched without a session. The first cached read of config (and the first of flags) for each user starts one background fetch on the thread pool that replaces them. `InitializeAsync(cacheDir:)` overrides the directory.
+- `FetchAsync` and `Flags.GetAsync` update the cache. A key the server leaves out (a config switched off with its kill switch, a disabled flag) leaves the cache, so lookups fall back to `configDefaults` and then the caller's default. Sign-out and `ResetAsync` delete the signed-out user's cached values.
+- `Amba.Flags.GetAsync(key)` returns the flag's assignment, and `null` for an unknown or disabled flag. It returned `null` for every enabled flag and threw for an unknown one.
+- `INativeMethods` gains `amba_config_get_cached`, `amba_flags_get_cached` and `amba_flags_is_enabled` (each `IntPtr key`). A class that implements `INativeMethods` (a custom transport or a test fake) adds all three.
+- Built on the 4.2.0 core.
+
 ## [4.1.0] — 2026-10-19
 
 - `Amba.Experiments.GetVariantAsync(key)` assigns the signed-in user to experiment `key` and returns an `ExperimentAssignment` (`ExperimentKey`, `Variant`, `BucketingId`). The assignment is sticky: later calls return the same variant. `BucketingId` is the user id the server hashed to pick the variant. `TrackExposureAsync(key)` records that the user saw it.

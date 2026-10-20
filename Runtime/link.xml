@@ -13,12 +13,14 @@
 -->
 <linker>
   <assembly fullname="com.layers.amba" preserve="all"/>
-  <!-- AmbaDeviceInfo reads Application.version / Application.platform
-       through reflection (the SDK assembly has no engine reference). -->
+  <!-- AmbaDeviceInfo reads Application.version / Application.platform /
+       Application.persistentDataPath through reflection (the SDK assembly
+       has no engine reference). -->
   <assembly fullname="UnityEngine.CoreModule">
     <type fullname="UnityEngine.Application">
       <property name="version"/>
       <property name="platform"/>
+      <property name="persistentDataPath"/>
     </type>
   </assembly>
 </linker>
