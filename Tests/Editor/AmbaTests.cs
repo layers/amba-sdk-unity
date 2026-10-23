@@ -329,6 +329,30 @@ namespace Layers.Amba.Tests
         }
 
         [Test]
+        public async System.Threading.Tasks.Task Auth_CoreSessionChanges_ReachOnAuthStateChange()
+        {
+            var captured = new List<Session>();
+            using var sub = _client.Auth.OnAuthStateChange(s => captured.Add(s));
+
+            // The core refreshed an access token the server refused while
+            // it served this call.
+            _fake.SeedSessionChange("{\"session\":{\"session_token\":\"s2\",\"user\":{\"id\":\"u_1\"}}}");
+            _fake.Enqueue("auth_me", "{\"id\":\"u_1\"}");
+            await _client.Auth.MeAsync();
+
+            // The core ended the session after the server rejected the
+            // refresh token, during a call that returns no string.
+            _fake.SeedSessionChange("{\"session\":null}");
+            _fake.Enqueue("auth_request_sms_otp", null);
+            await _client.Auth.RequestSmsOtpAsync("+15551234567");
+
+            Assert.That(captured.Count, Is.EqualTo(2));
+            Assert.That(captured[0], Is.Not.Null);
+            Assert.That((string)captured[0].User["id"], Is.EqualTo("u_1"));
+            Assert.That(captured[1], Is.Null);
+        }
+
+        [Test]
         public async System.Threading.Tasks.Task Auth_RequestSmsOtp_DispatchesPhone()
         {
             _fake.Enqueue("auth_request_sms_otp", null);
@@ -2504,6 +2528,25 @@ namespace Layers.Amba.Tests
         public IntPtr amba_auth_sign_out(uint rotateAnonymousId) =>
             Respond("auth_sign_out", rotateAnonymousId.ToString());
         public IntPtr amba_auth_refresh() => Respond("auth_refresh");
+
+        private readonly Queue<string> _sessionChanges = new();
+
+        /// <summary>
+        /// Queue a session change for the SDK to take after its next native
+        /// call, as the core reports one it made by itself.
+        /// </summary>
+        public void SeedSessionChange(string json)
+        {
+            lock (_sessionChanges) _sessionChanges.Enqueue(json);
+        }
+
+        public IntPtr amba_auth_take_session_change()
+        {
+            lock (_sessionChanges)
+            {
+                return _sessionChanges.Count == 0 ? IntPtr.Zero : ToOwnedPtr(_sessionChanges.Dequeue());
+            }
+        }
         public IntPtr amba_auth_me() => Respond("auth_me");
 
         public IntPtr amba_auth_request_email_otp(IntPtr email) =>

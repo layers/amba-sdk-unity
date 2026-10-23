@@ -2,6 +2,13 @@
 
 All notable changes to this package are documented here.
 
+## [4.2.1] — 2026-10-23
+
+- A refused session token no longer breaks every call. When Amba refuses the session token a call carried (`INVALID_SESSION_TOKEN`: the token expired, or Amba rotated the key that signs session tokens), the SDK refreshes the session with the refresh token and sends the call once more. Calls refused at the same moment share one refresh, a call is sent again at most once, and `Auth.OnAuthStateChange` hears the refreshed session. Until now every call failed with `INVALID_SESSION_TOKEN` until the app called `Auth.RefreshAsync()`.
+- When Amba rejects the refresh token as well, the SDK signs the user out: `Auth.OnAuthStateChange` fires with `null` and the call fails with its `INVALID_SESSION_TOKEN` error. A network failure or server error during the refresh keeps the session.
+- `Auth.RefreshAsync()` waits for a refresh already in flight, so the single-use refresh token is never sent twice.
+- `INativeMethods` gains `amba_auth_take_session_change()`. A class that implements `INativeMethods` (a custom transport or a test fake) adds it; returning `IntPtr.Zero` reports no change.
+
 ## [4.2.0] — 2026-10-20
 
 - `Amba.ConfigureAsync(..., configDefaults)`: the remote config values your app ships with, keyed by config key.

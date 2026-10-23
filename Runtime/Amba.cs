@@ -312,7 +312,7 @@ namespace Layers.Amba
     /// </summary>
     public static class Amba
     {
-        public const string Version = "4.2.0";
+        public const string Version = "4.2.1";
 
         private static AmbaClient _client;
 
@@ -553,7 +553,50 @@ namespace Layers.Amba
         // returned IDisposable closes over the exact reference to remove.
         private readonly HashSet<Action<Session>> _authSubscribers = new();
 
-        public AuthNamespace(INativeMethods bindings) { _bindings = bindings; }
+        /// <summary>
+        /// The context the namespace was created on (Unity's main thread
+        /// when the app configures from a MonoBehaviour). A session change
+        /// taken on a thread-pool thread (the background config or flags
+        /// fetch) is posted back to it.
+        /// </summary>
+        private readonly System.Threading.SynchronizationContext _createdOn;
+
+        public AuthNamespace(INativeMethods bindings)
+        {
+            _bindings = bindings;
+            _createdOn = System.Threading.SynchronizationContext.Current;
+            // Session changes the core makes by itself (a refresh after the
+            // server refused the access token, the sign-out after it
+            // rejected the refresh token) reach OnAuthStateChange like the
+            // ones the auth methods make.
+            NativeUtil.SetSessionChangeListener(bindings, ApplyCoreSessionChange);
+        }
+
+        /// <summary>
+        /// A session change the core made by itself, as the C ABI reports
+        /// it: <c>{"session": &lt;auth result&gt;}</c> after the core
+        /// refreshed an access token the server refused (the call was then
+        /// sent once more), and <c>{"session": null}</c> after it ended the
+        /// session because the server rejected the refresh token.
+        /// Subscribers hear the new session or null.
+        /// </summary>
+        internal void ApplyCoreSessionChange(string json)
+        {
+            JToken parsed;
+            try { parsed = JToken.Parse(json); }
+            catch (JsonException) { return; }
+            if (parsed.Type != JTokenType.Object) return;
+            var session = parsed["session"];
+            var snapshot = session != null && session.Type == JTokenType.Object ? SnapshotSession(session) : null;
+            if (_createdOn != null
+                && System.Threading.Thread.CurrentThread.IsThreadPoolThread
+                && System.Threading.SynchronizationContext.Current != _createdOn)
+            {
+                _createdOn.Post(_ => NotifyAuthSubscribers(snapshot), null);
+                return;
+            }
+            NotifyAuthSubscribers(snapshot);
+        }
 
         public Task<JToken> SignInAnonymouslyAsync()
         {
@@ -2539,6 +2582,13 @@ namespace Layers.Amba
         IntPtr amba_auth_verify_magic_link(IntPtr token);
         IntPtr amba_auth_link_account(IntPtr provider, IntPtr credential);
 
+        /// <summary>
+        /// The latest session change the core made by itself since the last
+        /// call (<c>{"session": ...}</c> JSON), or <see cref="IntPtr.Zero"/>
+        /// when there is none. The SDK calls it after every native call.
+        /// </summary>
+        IntPtr amba_auth_take_session_change();
+
         // ── users / sessions / sync / leagues (4.0) ──
         IntPtr amba_users_get(IntPtr userId);
         IntPtr amba_users_update(IntPtr userId, IntPtr patchJson);
@@ -2745,6 +2795,7 @@ namespace Layers.Amba
             NativeMethods.amba_auth_verify_magic_link(token);
         public IntPtr amba_auth_link_account(IntPtr provider, IntPtr credential) =>
             NativeMethods.amba_auth_link_account(provider, credential);
+        public IntPtr amba_auth_take_session_change() => NativeMethods.amba_auth_take_session_change();
 
         // ── users / sessions / sync / leagues (4.0) ──
         public IntPtr amba_users_get(IntPtr userId) => NativeMethods.amba_users_get(userId);
@@ -2938,12 +2989,49 @@ namespace Layers.Amba
             return p;
         }
 
+        /// <summary>
+        /// Per bindings instance, the handler told about session changes
+        /// the core makes by itself (<see cref="AuthNamespace"/> installs
+        /// it). Weakly keyed, so bindings that go away take it with them.
+        /// </summary>
+        private static readonly ConditionalWeakTable<INativeMethods, Action<string>> SessionChangeListeners =
+            new ConditionalWeakTable<INativeMethods, Action<string>>();
+
+        public static void SetSessionChangeListener(INativeMethods bindings, Action<string> listener)
+        {
+            lock (SessionChangeListeners)
+            {
+                SessionChangeListeners.Remove(bindings);
+                SessionChangeListeners.Add(bindings, listener);
+            }
+        }
+
+        /// <summary>
+        /// Copy and free a Rust-owned string. Every string-returning native
+        /// call passes through here, so this is also where a session change
+        /// the core made during the call is taken and handed to the
+        /// listener, before the calling method notifies its own auth event.
+        /// </summary>
         public static string PtrToStringAndFree(IntPtr ptr, INativeMethods bindings)
         {
-            if (ptr == IntPtr.Zero) return null;
-            string result = Marshal.PtrToStringUTF8(ptr);
-            bindings.amba_string_free(ptr);
+            string result = null;
+            if (ptr != IntPtr.Zero)
+            {
+                result = Marshal.PtrToStringUTF8(ptr);
+                bindings.amba_string_free(ptr);
+            }
+            TakeSessionChange(bindings);
             return result;
+        }
+
+        private static void TakeSessionChange(INativeMethods bindings)
+        {
+            if (!SessionChangeListeners.TryGetValue(bindings, out var listener)) return;
+            IntPtr change = bindings.amba_auth_take_session_change();
+            if (change == IntPtr.Zero) return;
+            string json = Marshal.PtrToStringUTF8(change);
+            bindings.amba_string_free(change);
+            listener(json);
         }
 
         public static string Invoke(Func<IntPtr, IntPtr> fn, string arg, INativeMethods bindings)
@@ -3129,6 +3217,7 @@ namespace Layers.Amba
         [DllImport(LIB)] public static extern IntPtr amba_auth_request_magic_link(IntPtr email);
         [DllImport(LIB)] public static extern IntPtr amba_auth_verify_magic_link(IntPtr token);
         [DllImport(LIB)] public static extern IntPtr amba_auth_link_account(IntPtr provider, IntPtr credential);
+        [DllImport(LIB)] public static extern IntPtr amba_auth_take_session_change();
 
         // ── users / sessions / sync / leagues (4.0) ──
         [DllImport(LIB)] public static extern IntPtr amba_users_get(IntPtr userId);
